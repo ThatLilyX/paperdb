@@ -1,9 +1,40 @@
-__pycache__/
-*.pyc
-.venv/
-venv/
+# Private notes: anything specific to one person's library lives here.
+docs/local/
+
+# Secrets. The Notion token is read from $NOTION_TOKEN and belongs in neither.
 .env
+.env.*
+
+# paperdb's own output. `config.toml` normally lives in ~/.config/paperdb,
+# but is ignored at any depth in case someone keeps it beside the project.
 config.toml
 library.bib
+
+# PDFs. The papers folder defaults to ~/Papers, but init takes any folder, and
+# pointing it inside the repo must not commit copyrighted papers.
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.python-version
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Editors and OS
+.idea/
+.vscode/
 .DS_Store
-docs/local/

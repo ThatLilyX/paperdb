@@ -10,6 +10,7 @@ from paperdb.metadata import (
     fetch_pdf,
     from_arxiv,
     from_doi,
+    resolve,
 )
 
 ATOM = """<?xml version="1.0" encoding="UTF-8"?>
@@ -185,3 +186,28 @@ def test_source_url(paper, expected):
 )
 def test_identities_ignore_arxiv_version_and_doi_case(paper, expected):
     assert paper.identities() == expected
+
+
+def _unreachable(request):
+    raise httpx.ConnectTimeout("The handshake operation timed out", request=request)
+
+
+def _server_error(request):
+    return httpx.Response(503, request=request)
+
+
+@pytest.mark.parametrize("handler", [_unreachable, _server_error], ids=["timeout", "503"])
+@pytest.mark.parametrize("identifier", ["2401.01234", "10.1038/example"], ids=["arxiv", "doi"])
+def test_a_network_failure_is_a_resolve_error_not_a_crash(identifier, handler):
+    """One flaky lookup must leave its file reported, not stop a whole sync."""
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ResolveError, match="could not reach"):
+        resolve(identifier, client=client)
+
+
+def test_a_download_that_times_out_is_not_a_pdf_error_not_a_crash():
+    client = httpx.Client(transport=httpx.MockTransport(_unreachable))
+
+    with pytest.raises(NotAPdfError, match="timed out"):
+        fetch_pdf("https://example.org/a.pdf", client=client)

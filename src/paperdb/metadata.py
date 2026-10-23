@@ -246,10 +246,16 @@ def _unpaywall_pdf_url(doi: str, email: str, client: httpx.Client) -> str:
 def resolve(identifier: str, email: str = "", client: httpx.Client | None = None) -> Paper:
     """Resolve any supported identifier to a :class:`Paper`."""
     kind, value = classify(identifier)
-    if kind == "arxiv":
-        return from_arxiv(value, client=client)
-    if kind == "doi":
-        return from_doi(value, email=email, client=client)
+    # A timeout or a 5xx is about the network, not the paper. It is still a
+    # ResolveError, so `sync` reports that one file and carries on.
+    try:
+        if kind == "arxiv":
+            return from_arxiv(value, client=client)
+        if kind == "doi":
+            return from_doi(value, email=email, client=client)
+    except httpx.HTTPError as error:
+        source = "arXiv" if kind == "arxiv" else "OpenAlex"
+        raise ResolveError(f"could not reach {source} for {value}: {error}") from error
     raise ResolveError(
         f"cannot resolve a bare URL yet: {value}. Pass its arXiv id or DOI, or "
         "download the PDF into the folder and run `paperdb sync`."
@@ -274,6 +280,8 @@ def fetch_pdf(url: str, client: httpx.Client | None = None) -> bytes:
         raise NotAPdfError(
             f"{url} answered {error.response.status_code}"
         ) from error
+    except httpx.HTTPError as error:
+        raise NotAPdfError(f"{url} could not be fetched: {error}") from error
     finally:
         if owned:
             client.close()

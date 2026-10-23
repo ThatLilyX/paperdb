@@ -1,6 +1,9 @@
 # Private notes: anything specific to one person's library lives here.
 docs/local/
 
+# Design notes are kept locally, not committed.
+docs/specs/
+
 # Secrets. The Notion token is read from $NOTION_TOKEN and belongs in neither.
 .env
 .env.*

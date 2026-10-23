@@ -167,3 +167,21 @@ def test_fetch_pdf_accepts_a_real_pdf_even_when_mislabelled():
 )
 def test_source_url(paper, expected):
     assert paper.source_url == expected
+
+
+@pytest.mark.parametrize(
+    "paper, expected",
+    [
+        pytest.param(
+            Paper(title="T", arxiv_id="2401.01234v2"), {"arxiv:2401.01234"}, id="new-style"
+        ),
+        pytest.param(
+            Paper(title="T", arxiv_id="solv-int/9901001v2"), {"arxiv:solv-int/9901001"},
+            id="old-style-with-a-v",
+        ),
+        pytest.param(Paper(title="T", doi="10.1038/ABC"), {"doi:10.1038/abc"}, id="doi-any-case"),
+        pytest.param(Paper(title="T"), set(), id="none"),
+    ],
+)
+def test_identities_ignore_arxiv_version_and_doi_case(paper, expected):
+    assert paper.identities() == expected

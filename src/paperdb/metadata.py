@@ -65,6 +65,20 @@ class Paper:
     def first_author(self) -> str:
         return self.authors[0] if self.authors else ""
 
+    def identities(self) -> set[str]:
+        """Strings that two records share exactly when they are the same paper.
+
+        arXiv versions are dropped, so ``v1`` and ``v2`` match, and DOIs are
+        compared without case, as the DOI system does.
+        """
+        ids = set()
+        if self.arxiv_id:
+            versioned = _ARXIV_NEW.match(self.arxiv_id) or _ARXIV_OLD.match(self.arxiv_id)
+            ids.add("arxiv:" + (versioned.group(1) if versioned else self.arxiv_id).lower())
+        if self.doi:
+            ids.add("doi:" + self.doi.lower())
+        return ids
+
     @property
     def source_url(self) -> str:
         if self.arxiv_id:

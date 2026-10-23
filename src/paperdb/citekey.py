@@ -52,9 +52,10 @@ def surname_of(author: str) -> str:
         family = author.split(",", 1)[0]
     else:
         parts = author.split()
-        # Everything after the first token is the family name, so initials and
-        # multi-word particles both survive.
-        family = " ".join(parts[1:]) if len(parts) > 1 else parts[0]
+        # Everything after the first token is the family name, so multi-word
+        # particles survive. Middle initials do not: "Thomas N. Kipf" is kipf.
+        rest = [p for p in parts[1:] if len(_fold(p)) > 1]
+        family = " ".join(rest) if rest else parts[0]
     folded = _fold(family)
     if not folded:
         raise CitekeyError(f"no usable surname in {author!r}")

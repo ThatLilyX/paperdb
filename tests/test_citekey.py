@@ -13,8 +13,15 @@ from paperdb.citekey import CitekeyError, is_citekey, keyword_of, mint, surname_
         ("Müller, Anna", "muller"),
         ("Plato", "plato"),
         ("O'Neill, Kate", "oneill"),
+        ("Thomas N. Kipf", "kipf"),
+        ("Petter N Kolm", "kolm"),
+        ("J. R. R. Tolkien", "tolkien"),
+        ("Jan C. van den Berg", "vandenberg"),
     ],
-    ids=["given-family", "family-comma", "particle-comma", "particle-plain", "accent", "mononym", "apostrophe"],
+    ids=[
+        "given-family", "family-comma", "particle-comma", "particle-plain", "accent", "mononym",
+        "apostrophe", "middle-initial", "initial-no-dot", "initials-only-given", "initial-and-particle",
+    ],
 )
 def test_surname_is_stable_across_conventions(author, expected):
     assert surname_of(author) == expected

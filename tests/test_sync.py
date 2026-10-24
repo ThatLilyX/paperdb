@@ -67,9 +67,22 @@ class FakeNotion:
 
 @pytest.fixture
 def folder(tmp_path):
-    papers = tmp_path / "Papers"
-    papers.mkdir()
-    return papers
+    """The library: ``Papers/db``, where filed papers live."""
+    library = tmp_path / "Papers" / "db"
+    library.mkdir(parents=True)
+    return library
+
+
+@pytest.fixture
+def inbox(folder):
+    """``Papers/Inbox``, beside the library. Not created: sync makes it on demand."""
+    return folder.parent / "Inbox"
+
+
+@pytest.fixture
+def papers(folder):
+    """``Papers`` itself, which holds the library, the inbox and library.bib."""
+    return folder.parent
 
 
 @pytest.fixture
@@ -79,7 +92,7 @@ def wired(monkeypatch, folder, tmp_path):
     def install(rows: list[dict], resolver=None) -> FakeNotion:
         fake = FakeNotion(rows)
         monkeypatch.setattr(
-            config, "load", lambda path=None: Config(papers_dir=folder, database_id="db")
+            config, "load", lambda path=None: Config(papers_dir=folder.parent, database_id="db")
         )
         monkeypatch.setattr(config, "token", lambda: "token")
         monkeypatch.setattr(cli.notion, "Notion", lambda token: fake)
@@ -165,17 +178,18 @@ def test_an_unkeyed_file_with_a_resolvable_id_is_adopted_and_renamed(wired, fold
     assert "adopt" in result.output
 
 
-def test_an_unkeyed_file_with_no_identifier_is_reported_not_guessed(wired, folder):
+def test_an_unkeyed_file_with_no_identifier_is_reported_not_guessed(wired, folder, inbox):
     (folder / "03 short name.pdf").write_bytes(PDF)
     fake = wired([])
 
     result = run()
 
     assert not (folder / "03 short name.pdf").exists()
-    assert (folder / "Inbox" / "03 short name.pdf").exists()
+    assert (inbox / "03 short name.pdf").exists()
     assert fake.created == []
     assert "no identifier" in result.output
-    assert "paperdb add" in result.output
+    assert "Rename it in Inbox/ to its arXiv id" in result.output
+    assert "paperdb add" not in result.output
 
 
 def test_a_file_whose_id_will_not_resolve_is_reported_with_the_reason(wired, folder):
@@ -233,7 +247,7 @@ def test_no_highlights_skips_the_annotation_pass(wired, folder):
     assert fake.highlights == {}
 
 
-def test_a_duplicate_download_never_overwrites_the_original(wired, folder):
+def test_a_duplicate_download_never_overwrites_the_original(wired, folder, inbox):
     """A browser's ``(1)`` copy must not be renamed over the annotated original."""
     original = folder / "smith2024graph Graph Things.pdf"
     copy = folder / "smith2024graph Graph Things (1).pdf"
@@ -244,9 +258,11 @@ def test_a_duplicate_download_never_overwrites_the_original(wired, folder):
     result = run()
 
     assert original.read_bytes() == PDF + b"annotated"
-    assert copy.read_bytes() == PDF + b"fresh"
+    assert not copy.exists()
+    assert (inbox / copy.name).read_bytes() == PDF + b"fresh"
     assert fake.filenames == {}
-    assert "Graph Things (1).pdf  (another copy of smith2024graph" in result.output
+    copy_line = "Inbox/smith2024graph Graph Things (1).pdf  (another copy of smith2024graph"
+    assert copy_line in result.output
 
 
 def test_two_files_renamed_to_the_same_name_keep_both(wired, folder):
@@ -259,7 +275,7 @@ def test_two_files_renamed_to_the_same_name_keep_both(wired, folder):
         result = run(*args)
         assert result.output.count("rename") == 1
 
-    assert len(list(folder.glob("*.pdf"))) == 2
+    assert len([p for p in folder.parent.rglob("*") if p.is_file()]) == 2
 
 
 def test_a_retitle_that_only_changes_case_still_renames(wired, folder):
@@ -273,7 +289,9 @@ def test_a_retitle_that_only_changes_case_still_renames(wired, folder):
     assert "already taken" not in result.output
 
 
-def test_a_failed_row_create_leaves_the_file_unkeyed_so_the_next_run_retries(wired, folder):
+def test_a_failed_row_create_leaves_the_file_in_the_inbox_so_the_next_run_retries(
+    wired, folder, inbox
+):
     (folder / "2401.01234.pdf").write_bytes(PDF)
     paper = Paper(title="A Paper Title", authors=["Ada Lastname"], year="2023")
     fake = wired([], resolver=lambda identifier, email="", client=None: paper)
@@ -283,7 +301,7 @@ def test_a_failed_row_create_leaves_the_file_unkeyed_so_the_next_run_retries(wir
 
     fake.create_row = outage
     run()
-    assert (folder / "Inbox" / "2401.01234.pdf").exists()
+    assert (inbox / "2401.01234.pdf").exists()
 
     del fake.create_row
     result = run()
@@ -376,7 +394,7 @@ def test_an_uppercase_pdf_extension_is_seen_and_never_overwritten(wired, folder)
 
     run()
 
-    assert sorted(p.read_bytes() for p in folder.iterdir()) == [
+    assert sorted(p.read_bytes() for p in folder.parent.rglob("*") if p.is_file()) == [
         PDF + b"annotated", PDF + b"fresh"
     ]
 
@@ -390,14 +408,14 @@ def test_the_file_the_row_names_wins_over_a_browser_copy(wired, folder):
 
     for args in (["--dry-run"], []):
         result = run(*args)
-        assert "rename  smith2024graph Old Title.pdf  ->" in result.output
+        assert "rename  db/smith2024graph Old Title.pdf  ->" in result.output
         assert "smith2024graph Old Title (1).pdf  (another copy of smith2024graph" in result.output
 
     assert (folder / "smith2024graph New Title.pdf").read_bytes() == PDF + b"annotated"
     assert fake.filenames == {"page-smith2024graph": "smith2024graph New Title.pdf"}
 
 
-def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder):
+def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder, inbox):
     original = folder / "lastname2023paper My Copy.pdf"
     original.write_bytes(PDF + b"annotated")
     (folder / "2401.01234.pdf").write_bytes(PDF + b"fresh")
@@ -411,7 +429,7 @@ def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder):
     result = run()
 
     assert (folder / "lastname2023paper A Paper Title.pdf").read_bytes() == PDF + b"annotated"
-    assert (folder / "Inbox" / "2401.01234.pdf").read_bytes() == PDF + b"fresh"
+    assert (inbox / "2401.01234.pdf").read_bytes() == PDF + b"fresh"
     assert "2401.01234.pdf  (another copy of lastname2023paper" in result.output
     assert fake.created == []
 
@@ -487,7 +505,7 @@ def test_add_with_a_key_on_two_files_records_the_original_not_the_copy(wired, fo
     assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
 
 
-def test_add_never_records_a_folder_as_the_paper(wired, folder):
+def test_add_never_records_a_folder_as_the_always_lastname2023(wired, folder):
     (folder / "lastname2023paper Dir.pdf").mkdir()
     paper = Paper(title="A Paper Title", authors=["Ada Lastname"], year="2023")
     fake = wired([], resolver=lambda identifier, email="", client=None: paper)
@@ -525,38 +543,38 @@ def test_a_case_variant_is_never_renamed_over_on_a_case_sensitive_disk(wired, fo
 # -- Inbox ---------------------------------------------------------------------
 
 
-def _paper(identifier="", email="", client=None):
+def _always_lastname2023(identifier="", email="", client=None):
+    """A resolver that answers every identifier with the same paper."""
     return Paper(title="A Paper Title", authors=["Ada Lastname"], year="2023")
 
 
-def test_a_pdf_dropped_in_the_inbox_is_filed_into_the_library(wired, folder):
-    inbox = folder / "Inbox"
+def test_a_pdf_dropped_in_the_inbox_is_filed_into_the_library(wired, folder, inbox):
     inbox.mkdir()
     (inbox / "2401.01234.pdf").write_bytes(PDF + b"dropped")
-    fake = wired([], resolver=_paper)
+    fake = wired([], resolver=_always_lastname2023)
 
     result = run()
 
     assert (folder / "lastname2023paper A Paper Title.pdf").read_bytes() == PDF + b"dropped"
     assert list(inbox.iterdir()) == []
     assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
-    assert "adopt   Inbox/2401.01234.pdf  ->  lastname2023paper A Paper Title.pdf" in result.output
+    filed = "adopt   Inbox/2401.01234.pdf  ->  db/lastname2023paper A Paper Title.pdf"
+    assert filed in result.output
 
 
-def test_a_pdf_dropped_in_the_library_goes_through_the_inbox(wired, folder):
+def test_a_pdf_dropped_in_the_library_goes_through_the_inbox(wired, folder, inbox):
     (folder / "2401.01234.pdf").write_bytes(PDF)
-    fake = wired([], resolver=_paper)
+    fake = wired([], resolver=_always_lastname2023)
 
     result = run()
 
     assert [p.name for p in folder.glob("*.pdf")] == ["lastname2023paper A Paper Title.pdf"]
-    assert list((folder / "Inbox").iterdir()) == []
+    assert list((inbox).iterdir()) == []
     assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
-    assert "inbox   2401.01234.pdf" in result.output
+    assert "inbox   db/2401.01234.pdf" in result.output
 
 
-def test_an_unidentified_pdf_in_the_inbox_stays_there(wired, folder):
-    inbox = folder / "Inbox"
+def test_an_unidentified_pdf_in_the_inbox_stays_there(wired, folder, inbox):
     inbox.mkdir()
     (inbox / "8631_Counting.pdf").write_bytes(PDF)
     fake = wired([])
@@ -568,8 +586,7 @@ def test_an_unidentified_pdf_in_the_inbox_stays_there(wired, folder):
     assert "Inbox/8631_Counting.pdf  (no identifier" in result.output
 
 
-def test_dry_run_shows_every_move_and_makes_none(wired, folder):
-    inbox = folder / "Inbox"
+def test_dry_run_shows_every_move_and_makes_none(wired, folder, inbox):
     inbox.mkdir()
     (inbox / "2402.00001.pdf").write_bytes(PDF)
     (folder / "2401.01234.pdf").write_bytes(PDF)
@@ -581,16 +598,17 @@ def test_dry_run_shows_every_move_and_makes_none(wired, folder):
 
     result = run("--dry-run")
 
-    assert "inbox   2401.01234.pdf" in result.output
-    assert "adopt   Inbox/2401.01234.pdf  ->  lastname2023first First Paper.pdf" in result.output
-    assert "adopt   Inbox/2402.00001.pdf  ->  other2024second Second Paper.pdf" in result.output
-    assert sorted(p.name for p in folder.rglob("*.pdf")) == ["2401.01234.pdf", "2402.00001.pdf"]
+    assert "inbox   db/2401.01234.pdf" in result.output
+    first = "adopt   Inbox/2401.01234.pdf  ->  db/lastname2023first First Paper.pdf"
+    assert first in result.output
+    assert "adopt   Inbox/2402.00001.pdf  ->  db/other2024second Second Paper.pdf" in result.output
+    everywhere = sorted(p.name for p in folder.parent.rglob("*.pdf"))
+    assert everywhere == ["2401.01234.pdf", "2402.00001.pdf"]
     assert fake.created == []
 
 
-def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder):
+def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder, inbox):
     """Same name in both folders: the library copy is the paper's, the inbox one waits."""
-    inbox = folder / "Inbox"
     inbox.mkdir()
     name = "smith2024graph Graph Things.pdf"
     (folder / name).write_bytes(PDF + b"annotated")
@@ -605,8 +623,7 @@ def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder):
     assert f"Inbox/{name}  (another copy of smith2024graph" in result.output
 
 
-def test_a_keyed_pdf_in_the_inbox_is_filed_when_its_row_has_no_file(wired, folder):
-    inbox = folder / "Inbox"
+def test_a_keyed_pdf_in_the_inbox_is_filed_when_its_row_has_no_file(wired, folder, inbox):
     inbox.mkdir()
     (inbox / "smith2024graph Old Name.pdf").write_bytes(PDF)
     fake = wired([row("smith2024graph", "Graph Things")])
@@ -618,8 +635,7 @@ def test_a_keyed_pdf_in_the_inbox_is_filed_when_its_row_has_no_file(wired, folde
     assert fake.filenames == {"page-smith2024graph": "smith2024graph Graph Things.pdf"}
 
 
-def test_a_stray_never_replaces_a_same_named_file_in_the_inbox(wired, folder):
-    inbox = folder / "Inbox"
+def test_a_stray_never_replaces_a_same_named_file_in_the_inbox(wired, folder, inbox):
     inbox.mkdir()
     (folder / "notes.pdf").write_bytes(PDF + b"library")
     (inbox / "notes.pdf").write_bytes(PDF + b"inbox")
@@ -632,7 +648,7 @@ def test_a_stray_never_replaces_a_same_named_file_in_the_inbox(wired, folder):
     assert "already taken by Inbox/notes.pdf" in result.output
 
 
-def test_init_creates_the_inbox(monkeypatch, tmp_path):
+def test_init_creates_the_library_and_the_inbox(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "token", lambda: "token")
     monkeypatch.setattr(cli.notion, "Notion", lambda token: FakeNotion([]))
     monkeypatch.setattr(config, "save", lambda settings: tmp_path / "config.toml")
@@ -641,3 +657,141 @@ def test_init_creates_the_inbox(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / "Papers" / "Inbox").is_dir()
+    assert (tmp_path / "Papers" / "db").is_dir()
+
+
+# -- Papers/db -----------------------------------------------------------------
+
+
+def test_a_filed_pdf_left_loose_in_papers_moves_into_the_library(wired, folder, papers):
+    """The migration from the flat layout: a keyed file in Papers/ belongs in db/."""
+    name = "smith2024graph Graph Things.pdf"
+    (papers / name).write_bytes(PDF + b"annotated")
+    fake = wired([row("smith2024graph", "Graph Things", name)])
+
+    result = run()
+
+    assert (folder / name).read_bytes() == PDF + b"annotated"
+    assert not (papers / name).exists()
+    assert f"file    {name}  ->  db/{name}" in result.output
+    assert "row(s) with no file" not in result.output
+    assert fake.filenames == {}
+
+
+def test_a_loose_unprocessed_pdf_in_papers_goes_through_the_inbox(wired, folder, inbox, papers):
+    (papers / "2401.01234.pdf").write_bytes(PDF)
+    fake = wired([], resolver=_always_lastname2023)
+
+    result = run()
+
+    assert [p.name for p in folder.iterdir()] == ["lastname2023paper A Paper Title.pdf"]
+    assert list(inbox.iterdir()) == []
+    assert [p.name for p in papers.glob("*.pdf")] == []
+    assert "inbox   2401.01234.pdf  ->  Inbox/" in result.output
+    assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
+
+
+def test_dry_run_of_the_migration_moves_nothing(wired, folder, papers):
+    name = "smith2024graph Graph Things.pdf"
+    (papers / name).write_bytes(PDF)
+    wired([row("smith2024graph", "Graph Things", name)])
+
+    result = run("--dry-run")
+
+    assert f"file    {name}  ->  db/{name}" in result.output
+    assert (papers / name).exists()
+    assert list(folder.iterdir()) == []
+
+
+def test_add_downloads_into_the_library(wired, folder, papers, monkeypatch):
+    paper = Paper(
+        title="A Paper Title", authors=["Ada Lastname"], year="2023",
+        pdf_url="https://example.org/a.pdf",
+    )
+    fake = wired([], resolver=lambda identifier, email="", client=None: paper)
+    monkeypatch.setattr(cli, "fetch_pdf", lambda url: PDF)
+
+    result = _add()
+
+    assert result.exit_code == 0, result.output
+    assert (folder / "lastname2023paper A Paper Title.pdf").read_bytes() == PDF
+    assert list(papers.glob("*.pdf")) == []
+    assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
+
+
+# -- review of PR #3 -------------------------------------------------------------
+
+
+def test_a_keyed_inbox_file_with_no_row_keeps_its_key(wired, folder, inbox):
+    """S1: minting a new paper never takes a key that an inbox file carries."""
+    inbox.mkdir()
+    (inbox / "2401.01234.pdf").write_bytes(PDF)
+    (inbox / "lastname2023paper Something Else.pdf").write_bytes(PDF + b"orphan")
+    fake = wired([], resolver=_always_lastname2023)
+
+    result = run()
+
+    assert fake.created == [("lastname2023paper-a", "lastname2023paper-a A Paper Title.pdf")]
+    assert (inbox / "lastname2023paper Something Else.pdf").read_bytes() == PDF + b"orphan"
+    assert "keyed lastname2023paper, no row in Notion" in result.output
+
+
+@pytest.mark.parametrize("blocker", ["db", "Inbox"])
+def test_a_file_where_a_folder_belongs_is_a_clear_error(wired, papers, blocker):
+    """S2: a plain file named db or Inbox stops sync with a message, not a traceback."""
+    library = papers / "db"
+    if blocker == "db":
+        library.rmdir()
+    (papers / blocker).write_bytes(b"not a folder")
+    (papers / "2401.01234.pdf").write_bytes(PDF)
+    wired([], resolver=_always_lastname2023)
+
+    result = run()
+
+    assert result.exit_code == 1
+    assert f"{blocker} is a file" in result.output
+    assert not isinstance(result.exception, FileExistsError)
+
+
+def test_a_keyed_orphan_gets_the_hint_that_binds_it(wired, folder):
+    """S3: the hint for a keyed file with no row is add --citekey, which records that file."""
+    (folder / "smith2024graph Graph.pdf").write_bytes(PDF)
+    wired([])
+
+    result = run()
+
+    assert "paperdb add <id> --citekey smith2024graph" in result.output
+    assert "Rename it in Inbox/" not in result.output
+
+
+def test_the_report_survives_a_notion_failure_mid_run(wired, folder, inbox):
+    """S6: moves already made are still reported when Notion fails later."""
+    (folder / "2401.01234.pdf").write_bytes(PDF)
+    fake = wired([], resolver=_always_lastname2023)
+
+    def outage(*_args, **_kwargs):
+        raise RuntimeError("Notion 502")
+
+    fake.create_row = outage
+    result = run()
+
+    assert "inbox   db/2401.01234.pdf  ->  Inbox/" in result.output
+    assert isinstance(result.exception, RuntimeError)
+
+
+def test_sync_creates_the_inbox_for_an_existing_setup(wired, folder, inbox):
+    """S7: a folder set up before the inbox existed gets one on the next sync."""
+    wired([])
+
+    run()
+
+    assert inbox.is_dir()
+
+
+def test_dry_run_creates_no_folders(wired, papers):
+    wired([])
+    (papers / "db").rmdir()
+
+    run("--dry-run")
+
+    assert sorted(p.name for p in papers.iterdir()) == []

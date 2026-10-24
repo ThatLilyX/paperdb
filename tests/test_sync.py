@@ -85,6 +85,15 @@ def papers(folder):
     return folder.parent
 
 
+@pytest.fixture(autouse=True)
+def trash(monkeypatch, tmp_path):
+    """Deleted duplicates go to a temp Trash, never the real one."""
+    bin_ = tmp_path / "Trash"
+    bin_.mkdir()
+    monkeypatch.setattr(cli, "TRASH", bin_)
+    return bin_
+
+
 @pytest.fixture
 def wired(monkeypatch, folder, tmp_path):
     """Point the CLI at the temp folder and a fake Notion."""
@@ -247,7 +256,7 @@ def test_no_highlights_skips_the_annotation_pass(wired, folder):
     assert fake.highlights == {}
 
 
-def test_a_duplicate_download_never_overwrites_the_original(wired, folder, inbox):
+def test_a_duplicate_download_never_overwrites_the_original(wired, folder, inbox, trash):
     """A browser's ``(1)`` copy must not be renamed over the annotated original."""
     original = folder / "smith2024graph Graph Things.pdf"
     copy = folder / "smith2024graph Graph Things (1).pdf"
@@ -259,13 +268,17 @@ def test_a_duplicate_download_never_overwrites_the_original(wired, folder, inbox
 
     assert original.read_bytes() == PDF + b"annotated"
     assert not copy.exists()
-    assert (inbox / copy.name).read_bytes() == PDF + b"fresh"
+    assert not (inbox / copy.name).exists()
+    assert (trash / copy.name).read_bytes() == PDF + b"fresh"
     assert fake.filenames == {}
-    copy_line = "Inbox/smith2024graph Graph Things (1).pdf  (another copy of smith2024graph"
-    assert copy_line in result.output
+    line = (
+        "delete  db/smith2024graph Graph Things (1).pdf  "
+        "(copy of db/smith2024graph Graph Things.pdf"
+    )
+    assert line in result.output
 
 
-def test_two_files_renamed_to_the_same_name_keep_both(wired, folder):
+def test_two_files_renamed_to_the_same_name_keep_both(wired, folder, trash):
     """A retitle that points two copies at one name renames only the first."""
     (folder / "smith2024graph Old Title.pdf").write_bytes(PDF + b"one")
     (folder / "smith2024graph Old Title (1).pdf").write_bytes(PDF + b"two")
@@ -275,7 +288,8 @@ def test_two_files_renamed_to_the_same_name_keep_both(wired, folder):
         result = run(*args)
         assert result.output.count("rename") == 1
 
-    assert len([p for p in folder.parent.rglob("*") if p.is_file()]) == 2
+    kept = [p for p in folder.parent.rglob("*") if p.is_file()] + list(trash.iterdir())
+    assert len(kept) == 2
 
 
 def test_a_retitle_that_only_changes_case_still_renames(wired, folder):
@@ -386,7 +400,7 @@ def test_names_differing_only_in_case_are_both_held(wired):
     assert alone.taken_by("k2024a Graph Things.pdf", "k2024a graph things.pdf") is None
 
 
-def test_an_uppercase_pdf_extension_is_seen_and_never_overwritten(wired, folder):
+def test_an_uppercase_pdf_extension_is_seen_and_never_overwritten(wired, folder, trash):
     annotated = folder / "smith2024graph New Title.PDF"
     annotated.write_bytes(PDF + b"annotated")
     (folder / "smith2024graph Old Title.pdf").write_bytes(PDF + b"fresh")
@@ -394,7 +408,8 @@ def test_an_uppercase_pdf_extension_is_seen_and_never_overwritten(wired, folder)
 
     run()
 
-    assert sorted(p.read_bytes() for p in folder.parent.rglob("*") if p.is_file()) == [
+    everywhere = [p for p in folder.parent.rglob("*") if p.is_file()] + list(trash.iterdir())
+    assert sorted(p.read_bytes() for p in everywhere) == [
         PDF + b"annotated", PDF + b"fresh"
     ]
 
@@ -409,13 +424,13 @@ def test_the_file_the_row_names_wins_over_a_browser_copy(wired, folder):
     for args in (["--dry-run"], []):
         result = run(*args)
         assert "rename  db/smith2024graph Old Title.pdf  ->" in result.output
-        assert "smith2024graph Old Title (1).pdf  (another copy of smith2024graph" in result.output
+        assert "delete  db/smith2024graph Old Title (1).pdf  (copy of" in result.output
 
     assert (folder / "smith2024graph New Title.pdf").read_bytes() == PDF + b"annotated"
     assert fake.filenames == {"page-smith2024graph": "smith2024graph New Title.pdf"}
 
 
-def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder, inbox):
+def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder, inbox, trash):
     original = folder / "lastname2023paper My Copy.pdf"
     original.write_bytes(PDF + b"annotated")
     (folder / "2401.01234.pdf").write_bytes(PDF + b"fresh")
@@ -429,8 +444,9 @@ def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder, 
     result = run()
 
     assert (folder / "lastname2023paper A Paper Title.pdf").read_bytes() == PDF + b"annotated"
-    assert (inbox / "2401.01234.pdf").read_bytes() == PDF + b"fresh"
-    assert "2401.01234.pdf  (another copy of lastname2023paper" in result.output
+    assert (trash / "2401.01234.pdf").read_bytes() == PDF + b"fresh"
+    line = "delete  Inbox/2401.01234.pdf  (copy of db/lastname2023paper A Paper Title.pdf"
+    assert line in result.output
     assert fake.created == []
 
 
@@ -607,7 +623,7 @@ def test_dry_run_shows_every_move_and_makes_none(wired, folder, inbox):
     assert fake.created == []
 
 
-def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder, inbox):
+def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder, inbox, trash):
     """Same name in both folders: the library copy is the paper's, the inbox one waits."""
     inbox.mkdir()
     name = "smith2024graph Graph Things.pdf"
@@ -618,9 +634,9 @@ def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder, inbox):
     result = run()
 
     assert (folder / name).read_bytes() == PDF + b"annotated"
-    assert (inbox / name).read_bytes() == PDF + b"fresh"
+    assert (trash / name).read_bytes() == PDF + b"fresh"
     assert fake.filenames == {}
-    assert f"Inbox/{name}  (another copy of smith2024graph" in result.output
+    assert f"delete  Inbox/{name}  (copy of db/{name}" in result.output
 
 
 def test_a_keyed_pdf_in_the_inbox_is_filed_when_its_row_has_no_file(wired, folder, inbox):
@@ -795,3 +811,73 @@ def test_dry_run_creates_no_folders(wired, papers):
     run("--dry-run")
 
     assert sorted(p.name for p in papers.iterdir()) == []
+
+
+# -- duplicates ------------------------------------------------------------------
+
+
+def test_an_annotated_copy_is_never_deleted(wired, folder, inbox, trash, monkeypatch):
+    """A copy holding highlights the filed paper lacks waits in the inbox instead."""
+    filed = folder / "smith2024graph Graph Things.pdf"
+    filed.write_bytes(PDF + b"plain")
+    copy = folder / "smith2024graph Graph Things (1).pdf"
+    copy.write_bytes(PDF + b"marked")
+    wired([row("smith2024graph", "Graph Things", filed.name)])
+    monkeypatch.setattr(
+        cli, "extract", lambda pdf: ["a mark"] if b"marked" in pdf.read_bytes() else []
+    )
+
+    result = run()
+
+    assert (inbox / copy.name).read_bytes() == PDF + b"marked"
+    assert list(trash.iterdir()) == []
+    assert "delete  " not in result.output
+    assert "highlights the filed copy lacks" in result.output
+
+
+def test_an_inbox_copy_of_a_filed_paper_is_deleted(wired, folder, inbox, trash):
+    inbox.mkdir()
+    (folder / "lastname2023paper A Paper Title.pdf").write_bytes(PDF)
+    (inbox / "2401.01234v1.pdf").write_bytes(PDF + b"fresh")
+    existing = row("lastname2023paper", "A Paper Title", "lastname2023paper A Paper Title.pdf")
+    existing["properties"]["arXiv ID"] = {"rich_text": _rich("2401.01234v2")}
+    paper = Paper(
+        title="A Paper Title", authors=["Ada Lastname"], year="2023", arxiv_id="2401.01234v1"
+    )
+    fake = wired([existing], resolver=lambda identifier, email="", client=None: paper)
+
+    result = run()
+
+    assert (trash / "2401.01234v1.pdf").exists()
+    assert list(inbox.iterdir()) == []
+    assert fake.created == []
+    line = "delete  Inbox/2401.01234v1.pdf  (copy of db/lastname2023paper A Paper Title.pdf"
+    assert line in result.output
+
+
+def test_dry_run_deletes_nothing(wired, folder, trash):
+    filed = folder / "smith2024graph Graph Things.pdf"
+    filed.write_bytes(PDF)
+    copy = folder / "smith2024graph Graph Things (1).pdf"
+    copy.write_bytes(PDF)
+    wired([row("smith2024graph", "Graph Things", filed.name)])
+
+    result = run("--dry-run")
+
+    assert copy.exists()
+    assert list(trash.iterdir()) == []
+    assert "delete  db/smith2024graph Graph Things (1).pdf" in result.output
+
+
+def test_a_deleted_copy_never_replaces_a_file_already_in_the_trash(wired, folder, trash):
+    filed = folder / "smith2024graph Graph Things.pdf"
+    filed.write_bytes(PDF)
+    copy = folder / "smith2024graph Graph Things (1).pdf"
+    copy.write_bytes(PDF + b"copy")
+    (trash / copy.name).write_bytes(b"already binned")
+    wired([row("smith2024graph", "Graph Things", filed.name)])
+
+    run()
+
+    assert (trash / copy.name).read_bytes() == b"already binned"
+    assert sorted(p.read_bytes() for p in trash.iterdir()) == [PDF + b"copy", b"already binned"]

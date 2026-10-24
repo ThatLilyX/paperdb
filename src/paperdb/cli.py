@@ -108,6 +108,31 @@ class FolderNames:
         self._held.setdefault(name.casefold(), set()).add(name)
 
 
+# Where a deleted duplicate goes: the Trash, so a mistake can be undone.
+TRASH = Path.home() / ".Trash"
+
+
+def _discard(pdf: Path) -> Path:
+    """Move ``pdf`` to the Trash under a name nothing there already has."""
+    target = TRASH / pdf.name
+    n = 1
+    while target.exists():
+        target = TRASH / f"{pdf.stem} (paperdb {n}){pdf.suffix}"
+        n += 1
+    _move(pdf, target)
+    return target
+
+
+def _redundant(copy: Path, kept: Path) -> bool:
+    """Whether deleting ``copy`` loses nothing that ``kept`` does not hold.
+
+    The same bytes, or every highlight in the copy already in the kept file.
+    """
+    if copy.read_bytes() == kept.read_bytes():
+        return True
+    return set(extract(copy)) <= set(extract(kept))
+
+
 def _move(source: Path, target: Path) -> None:
     """Rename, refusing to replace a file that is already there.
 
@@ -261,6 +286,7 @@ def sync(dry_run, no_highlights) -> None:
 
     rows = _index(client, settings.database_id)
     seen: set[str] = set()
+    filed: dict[str, Path] = {}  # each row's own file, where it is now
     pdfs = _pdfs(folder)
     # Loose in Papers/ itself: filed papers from before db/ existed, or drops.
     loose = _pdfs(settings.papers_dir)
@@ -324,6 +350,7 @@ def sync(dry_run, no_highlights) -> None:
         if current:
             held.leave(current)
         held.arrive(wanted)
+        shown[folder / wanted] = library_label + wanted
         return folder / wanted
 
     def settle(pdf: Path, key: str, verb: str) -> None:
@@ -339,10 +366,12 @@ def sync(dry_run, no_highlights) -> None:
                 if notion.row_text(row, "Filename") != wanted:
                     client.set_filename(row["id"], wanted)
                 pdf = moved
+            filed[key] = pdf
         elif notion.row_text(row, "Filename") != pdf.name:
             plan.append(f"repair  Filename for {key}")
             if not dry_run:
                 client.set_filename(row["id"], pdf.name)
+        filed.setdefault(key, pdf)
         if not no_highlights:
             found = extract(pdf)
             if dry_run:
@@ -385,6 +414,20 @@ def sync(dry_run, no_highlights) -> None:
             f"paperdb add <id> --citekey {key} records this file)"
         )
 
+    def dedupe(pdf: Path, key: str) -> None:
+        """Delete a copy of a filed paper, unless it holds something the filed one lacks."""
+        kept = filed.get(key)
+        if kept is not None and _redundant(pdf, kept):
+            plan.append(f"delete  {name_of(pdf)}  (copy of {name_of(kept)}; moved to Trash)")
+            if not dry_run:
+                _discard(pdf)
+            return
+        why = "highlights the filed copy lacks" if kept is not None else "which has a file"
+        if pdf in inboxed:
+            conflicts.append(f"{name_of(pdf)}  (another copy of {key}, {why})")
+        else:
+            to_inbox(pdf)
+
     try:
         with client:
             # Anything unprocessed outside the inbox goes there first, so the
@@ -409,16 +452,14 @@ def sync(dry_run, no_highlights) -> None:
                 settle(own, key, "rename  " if own.parent == folder else "file    ")
                 for pdf in copies:
                     if pdf != own:
-                        to_inbox(pdf)
+                        dedupe(pdf, key)
 
             fetched_from_arxiv = False
             for pdf in waiting:
                 key = names.citekey_in(pdf.name)
                 if key:
                     if key in seen:
-                        conflicts.append(
-                            f"{name_of(pdf)}  (another copy of {key}, which has a file)"
-                        )
+                        dedupe(pdf, key)
                     elif key in rows:
                         settle(pdf, key, "file    ")
                     else:
@@ -444,9 +485,7 @@ def sync(dry_run, no_highlights) -> None:
                     (by_identity[i] for i in sorted(paper.identities()) if i in by_identity), None
                 )
                 if known in seen:
-                    conflicts.append(
-                        f"{name_of(pdf)}  (another copy of {known}, which has a file)"
-                    )
+                    dedupe(pdf, known)
                     continue
                 if known:
                     # Already in the database: bind the file to that row, never a second one.

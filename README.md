@@ -14,6 +14,14 @@ year, first meaningful title word). The PDF is saved under that key, and a row i
 Notion records the authors, venue, year, identifiers and abstract. PDFs stay in
 your folder; nothing is uploaded to Notion.
 
+```
+~/Papers/                      filed papers, each named by its citekey
+  smith2024graph Graph Neural Networks at Scale.pdf
+  library.bib
+  Inbox/                       drop new PDFs here; anything paperdb can't file stays here
+    2305.18290.pdf
+```
+
 ## Setup
 
 Requires Python 3.11 or newer and a Notion integration token.
@@ -55,10 +63,11 @@ Keys never change once given, even if you retitle the paper.
 
 | You did this | sync does this |
 | --- | --- |
+| Dropped a PDF into `Inbox/` | Identifies it, adds a row and files it into the library |
+| Dropped a PDF straight into the library | Moves it to `Inbox/`, then files it the same way |
 | Retitled a paper in Notion | Renames the file to match |
-| Dropped a PDF into the folder | Identifies it, renames it and adds a row |
 | Highlighted a PDF in your reader | Copies the highlights to the page's `Highlights` section |
-| Have a PDF it can't identify | Lists it, so you can add it with `paperdb add <id> --citekey <key>` |
+| Have a PDF it can't identify | Leaves it in `Inbox/` and lists it. Rename it to its arXiv id or DOI (e.g. `2305.18290.pdf`) and sync again |
 | Deleted a row, or a file | Lists the one left behind, and changes neither |
 
 Run `paperdb sync --dry-run` first on a folder that already has papers in it. It

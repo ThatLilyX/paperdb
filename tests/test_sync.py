@@ -171,7 +171,8 @@ def test_an_unkeyed_file_with_no_identifier_is_reported_not_guessed(wired, folde
 
     result = run()
 
-    assert (folder / "03 short name.pdf").exists()
+    assert not (folder / "03 short name.pdf").exists()
+    assert (folder / "Inbox" / "03 short name.pdf").exists()
     assert fake.created == []
     assert "no identifier" in result.output
     assert "paperdb add" in result.output
@@ -282,7 +283,7 @@ def test_a_failed_row_create_leaves_the_file_unkeyed_so_the_next_run_retries(wir
 
     fake.create_row = outage
     run()
-    assert (folder / "2401.01234.pdf").exists()
+    assert (folder / "Inbox" / "2401.01234.pdf").exists()
 
     del fake.create_row
     result = run()
@@ -410,7 +411,7 @@ def test_an_unkeyed_copy_never_takes_the_row_from_its_keyed_file(wired, folder):
     result = run()
 
     assert (folder / "lastname2023paper A Paper Title.pdf").read_bytes() == PDF + b"annotated"
-    assert (folder / "2401.01234.pdf").read_bytes() == PDF + b"fresh"
+    assert (folder / "Inbox" / "2401.01234.pdf").read_bytes() == PDF + b"fresh"
     assert "2401.01234.pdf  (another copy of lastname2023paper" in result.output
     assert fake.created == []
 
@@ -519,3 +520,124 @@ def test_a_case_variant_is_never_renamed_over_on_a_case_sensitive_disk(wired, fo
 
     assert annotated.read_bytes() == PDF + b"annotated"
     assert (folder / "smith2024graph graph things.pdf").read_bytes() == PDF + b"fresh"
+
+
+# -- Inbox ---------------------------------------------------------------------
+
+
+def _paper(identifier="", email="", client=None):
+    return Paper(title="A Paper Title", authors=["Ada Lastname"], year="2023")
+
+
+def test_a_pdf_dropped_in_the_inbox_is_filed_into_the_library(wired, folder):
+    inbox = folder / "Inbox"
+    inbox.mkdir()
+    (inbox / "2401.01234.pdf").write_bytes(PDF + b"dropped")
+    fake = wired([], resolver=_paper)
+
+    result = run()
+
+    assert (folder / "lastname2023paper A Paper Title.pdf").read_bytes() == PDF + b"dropped"
+    assert list(inbox.iterdir()) == []
+    assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
+    assert "adopt   Inbox/2401.01234.pdf  ->  lastname2023paper A Paper Title.pdf" in result.output
+
+
+def test_a_pdf_dropped_in_the_library_goes_through_the_inbox(wired, folder):
+    (folder / "2401.01234.pdf").write_bytes(PDF)
+    fake = wired([], resolver=_paper)
+
+    result = run()
+
+    assert [p.name for p in folder.glob("*.pdf")] == ["lastname2023paper A Paper Title.pdf"]
+    assert list((folder / "Inbox").iterdir()) == []
+    assert fake.created == [("lastname2023paper", "lastname2023paper A Paper Title.pdf")]
+    assert "inbox   2401.01234.pdf" in result.output
+
+
+def test_an_unidentified_pdf_in_the_inbox_stays_there(wired, folder):
+    inbox = folder / "Inbox"
+    inbox.mkdir()
+    (inbox / "8631_Counting.pdf").write_bytes(PDF)
+    fake = wired([])
+
+    result = run()
+
+    assert (inbox / "8631_Counting.pdf").exists()
+    assert fake.created == []
+    assert "Inbox/8631_Counting.pdf  (no identifier" in result.output
+
+
+def test_dry_run_shows_every_move_and_makes_none(wired, folder):
+    inbox = folder / "Inbox"
+    inbox.mkdir()
+    (inbox / "2402.00001.pdf").write_bytes(PDF)
+    (folder / "2401.01234.pdf").write_bytes(PDF)
+    papers = {
+        "2401.01234": Paper(title="First Paper", authors=["Ada Lastname"], year="2023"),
+        "2402.00001": Paper(title="Second Paper", authors=["Bo Other"], year="2024"),
+    }
+    fake = wired([], resolver=lambda identifier, email="", client=None: papers[identifier])
+
+    result = run("--dry-run")
+
+    assert "inbox   2401.01234.pdf" in result.output
+    assert "adopt   Inbox/2401.01234.pdf  ->  lastname2023first First Paper.pdf" in result.output
+    assert "adopt   Inbox/2402.00001.pdf  ->  other2024second Second Paper.pdf" in result.output
+    assert sorted(p.name for p in folder.rglob("*.pdf")) == ["2401.01234.pdf", "2402.00001.pdf"]
+    assert fake.created == []
+
+
+def test_an_inbox_copy_of_a_filed_paper_never_replaces_it(wired, folder):
+    """Same name in both folders: the library copy is the paper's, the inbox one waits."""
+    inbox = folder / "Inbox"
+    inbox.mkdir()
+    name = "smith2024graph Graph Things.pdf"
+    (folder / name).write_bytes(PDF + b"annotated")
+    (inbox / name).write_bytes(PDF + b"fresh")
+    fake = wired([row("smith2024graph", "Graph Things", name)])
+
+    result = run()
+
+    assert (folder / name).read_bytes() == PDF + b"annotated"
+    assert (inbox / name).read_bytes() == PDF + b"fresh"
+    assert fake.filenames == {}
+    assert f"Inbox/{name}  (another copy of smith2024graph" in result.output
+
+
+def test_a_keyed_pdf_in_the_inbox_is_filed_when_its_row_has_no_file(wired, folder):
+    inbox = folder / "Inbox"
+    inbox.mkdir()
+    (inbox / "smith2024graph Old Name.pdf").write_bytes(PDF)
+    fake = wired([row("smith2024graph", "Graph Things")])
+
+    run()
+
+    assert (folder / "smith2024graph Graph Things.pdf").exists()
+    assert list(inbox.iterdir()) == []
+    assert fake.filenames == {"page-smith2024graph": "smith2024graph Graph Things.pdf"}
+
+
+def test_a_stray_never_replaces_a_same_named_file_in_the_inbox(wired, folder):
+    inbox = folder / "Inbox"
+    inbox.mkdir()
+    (folder / "notes.pdf").write_bytes(PDF + b"library")
+    (inbox / "notes.pdf").write_bytes(PDF + b"inbox")
+    wired([])
+
+    result = run()
+
+    assert (folder / "notes.pdf").read_bytes() == PDF + b"library"
+    assert (inbox / "notes.pdf").read_bytes() == PDF + b"inbox"
+    assert "already taken by Inbox/notes.pdf" in result.output
+
+
+def test_init_creates_the_inbox(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "token", lambda: "token")
+    monkeypatch.setattr(cli.notion, "Notion", lambda token: FakeNotion([]))
+    monkeypatch.setattr(config, "save", lambda settings: tmp_path / "config.toml")
+
+    result = CliRunner().invoke(cli.main, ["init", str(tmp_path / "Papers"), "--database", "db"])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "Papers" / "Inbox").is_dir()

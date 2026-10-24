@@ -19,6 +19,8 @@ CONFIG_PATH = Path(
     / "config.toml"
 )
 DEFAULT_PAPERS_DIR = Path.home() / "Papers"
+# Where unprocessed PDFs wait, inside the papers folder.
+INBOX_NAME = "Inbox"
 TOKEN_ENV = "NOTION_TOKEN"
 
 
@@ -31,6 +33,11 @@ class Config:
     papers_dir: Path
     database_id: str = ""
     email: str = ""
+
+    @property
+    def inbox_dir(self) -> Path:
+        """Where PDFs wait until sync can file them."""
+        return self.papers_dir / INBOX_NAME
 
     @property
     def bib_path(self) -> Path:

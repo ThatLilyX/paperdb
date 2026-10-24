@@ -19,6 +19,11 @@ SKIP_WORDS = frozenset(
     that these those we our you your it its""".split()
 )
 
+# Lowercase words that belong to the family name that follows them.
+PARTICLES = frozenset(
+    """van von der den de del della di da das dos du la le ter ten bin al el""".split()
+)
+
 _ALLOWED = frozenset(string.ascii_lowercase + string.digits)
 
 # Collisions get a separated suffix rather than a bare letter. A bare letter
@@ -51,11 +56,16 @@ def surname_of(author: str) -> str:
     if "," in author:
         family = author.split(",", 1)[0]
     else:
-        parts = author.split()
-        # Everything after the first token is the family name, so multi-word
-        # particles survive. Middle initials do not: "Thomas N. Kipf" is kipf.
-        rest = [p for p in parts[1:] if len(_fold(p)) > 1]
-        family = " ".join(rest) if rest else parts[0]
+        # Initials are never the family name: "Kipf T. N." is kipf.
+        parts = [w for w in author.split() if len(_fold(w)) > 1] or author.split()
+        # The family name is the last word plus any particles right before it:
+        # "Piet van den Berg" is vandenberg, "Abdul Fatir Ansari" is ansari.
+        family_words = [parts[-1]]
+        for word in reversed(parts[1:-1]):
+            if word.lower() not in PARTICLES:
+                break
+            family_words.insert(0, word)
+        family = " ".join(family_words)
     folded = _fold(family)
     if not folded:
         raise CitekeyError(f"no usable surname in {author!r}")

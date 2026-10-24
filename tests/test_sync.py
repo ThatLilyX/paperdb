@@ -13,6 +13,7 @@ from paperdb import cli, config
 from paperdb.config import Config
 from paperdb.metadata import Paper, ResolveError
 from paperdb.notion import _rich
+from paperdb.summarize import Summary, SummarizeError
 
 PDF = b"%PDF-1.7\n%%EOF\n"
 
@@ -885,7 +886,6 @@ def test_a_deleted_copy_never_replaces_a_file_already_in_the_trash(wired, folder
 
 # -- summarize -----------------------------------------------------------------
 
-from paperdb.summarize import SummarizeError, Summary  # noqa: E402
 
 
 class FocusNotion(FakeNotion):
@@ -910,7 +910,7 @@ def reader(monkeypatch):
         def fake(pdf, title, model=None, **_):
             read.append(pdf.name)
             if any(key in pdf.name for key in fail_on):
-                raise SummarizeError("Not logged in")
+                raise SummarizeError("Not logged in", cost_usd=0.25)
             return Summary(bullets=[f"New idea in {title}."], cost_usd=0.5, seconds=3.0)
 
         monkeypatch.setattr(cli, "summarize", fake)
@@ -924,7 +924,7 @@ def summarize_run(*args):
 
 
 def focus_wired(wired, monkeypatch, rows, notes=None) -> FocusNotion:
-    fake = wired([])
+    wired([])  # points config and token at the temp folder
     focus = FocusNotion(rows, notes)
     monkeypatch.setattr(cli.notion, "Notion", lambda token: focus)
     return focus
@@ -1014,6 +1014,7 @@ def test_one_failed_paper_is_reported_and_the_rest_still_run(wired, monkeypatch,
 
     assert fake.written == {"page-smith2024graph": ["New idea in Graph."]}
     assert "jones2023deep" in result.output and "Not logged in" in result.output
+    assert "$0.75" in result.output, "the failed read's cost is in the total"
     assert result.exit_code != 0, "a failure is visible to scripts too"
 
 
@@ -1025,3 +1026,4 @@ def test_a_row_with_no_pdf_is_reported_not_read(wired, monkeypatch, folder, read
 
     assert read == [] and fake.written == {}
     assert "no PDF" in result.output
+    assert result.exit_code == 0, "a missing file is reported, as sync does, not a failure"

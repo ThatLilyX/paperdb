@@ -2,9 +2,9 @@
 
 The reading is done by the Claude Code CLI, which opens the PDF itself: every
 page, figures and equations included, with no text-extraction step in between.
-It runs on the user's own Claude login, so paperdb needs no API key. Claude gets
-the Read tool and nothing else, scoped to the paper's folder, so it can look but
-never change anything.
+It runs on the user's own Claude login, so paperdb needs no API key. Read is the
+only tool Claude has, confined to the paper's folder, and none of the user's MCP
+servers load, so it can look but never change anything.
 """
 
 from __future__ import annotations
@@ -50,11 +50,20 @@ the paper has one. No markdown, no leading bullet characters, no section numbers
 
 
 class SummarizeError(RuntimeError):
-    """Raised when Claude could not produce bullets for a paper."""
+    """Raised when Claude could not produce bullets for a paper.
+
+    Carries what the attempt cost, so a failed read still counts in the total.
+    """
+
+    def __init__(self, message: str, cost_usd: float = 0.0):
+        super().__init__(message)
+        self.cost_usd = cost_usd
 
 
 @dataclass
 class Summary:
+    """One paper's bullets, with what reading it took."""
+
     bullets: list[str]
     cost_usd: float = 0.0
     seconds: float = 0.0
@@ -68,7 +77,13 @@ def command(pdf: Path, title: str, model: str | None = None, budget: float = MAX
         PROMPT.format(path=str(pdf), title=title, low=MIN_BULLETS, high=MAX_BULLETS),
         "--output-format", "json",
         "--json-schema", json.dumps(SCHEMA),
+        # Read is the only tool that exists, not merely the only one pre-approved:
+        # the user's own settings may approve anything else automatically.
+        "--tools", "Read",
         "--allowedTools", "Read",
+        "--restricted",
+        "--strict-mcp-config",
+        "--permission-mode", "dontAsk",
         "--add-dir", str(pdf.parent),
         "--max-budget-usd", f"{budget:g}",
         "--no-session-persistence",
@@ -113,9 +128,10 @@ def summarize(
         detail = (done.stderr or done.stdout or "").strip() or f"exit status {done.returncode}"
         raise SummarizeError(f"Claude failed: {detail}") from None
 
+    cost = float(reply.get("total_cost_usd") or 0.0)
     if reply.get("is_error") or reply.get("subtype") != "success":
         detail = (reply.get("result") or "").strip() or reply.get("subtype") or "unknown error"
-        raise SummarizeError(f"Claude failed: {detail}")
+        raise SummarizeError(f"Claude failed: {detail}", cost)
 
     bullets = [
         text.strip()
@@ -123,9 +139,13 @@ def summarize(
         if isinstance(text, str) and text.strip()
     ]
     if not bullets:
-        raise SummarizeError("Claude returned no bullets")
+        raise SummarizeError("Claude returned no bullets", cost)
+    if not MIN_BULLETS <= len(bullets) <= MAX_BULLETS:
+        raise SummarizeError(
+            f"Claude returned {len(bullets)} bullets, not {MIN_BULLETS} to {MAX_BULLETS}", cost
+        )
     return Summary(
         bullets=bullets,
-        cost_usd=float(reply.get("total_cost_usd") or 0.0),
+        cost_usd=cost,
         seconds=time.monotonic() - started,
     )

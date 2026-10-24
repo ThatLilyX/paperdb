@@ -222,23 +222,16 @@ class Notion:
 
     # -- focus notes -----------------------------------------------------------
 
-    def _section(self, page_id: str, title: str) -> tuple[list[dict], int | None, list[dict]]:
-        """The page's blocks, the index of heading ``title``, and the blocks under it."""
-        children = self._call("GET", f"/blocks/{page_id}/children?page_size=100")["results"]
-        for index, block in enumerate(children):
-            if block["type"] == "heading_2" and _plain(block).strip() == title:
-                section = []
-                for below in children[index + 1 :]:
-                    if below["type"].startswith("heading"):
-                        break
-                    section.append(below)
-                return children, index, section
-        return children, None, []
+    def _children(self, page_id: str) -> list[dict]:
+        return self._call("GET", f"/blocks/{page_id}/children?page_size=100")["results"]
 
     def focus_notes(self, page_id: str) -> list[str]:
         """The non-empty lines under "What to focus on". The empty heading reads as []."""
-        _, _, section = self._section(page_id, FOCUS_HEADING)
-        return [text for text in (_plain(b).strip() for b in section) if text]
+        children = self._children(page_id)
+        at = _heading_at(children, FOCUS_HEADING)
+        if at is None:
+            return []
+        return [text for text in (_plain(b).strip() for b in _under(children, at)) if text]
 
     def replace_focus(self, page_id: str, bullets) -> None:
         """Make ``bullets`` the whole of the "What to focus on" section.
@@ -247,19 +240,20 @@ class Notion:
         way leaves both rather than neither. A page without the heading gets it
         above Highlights: sync rewrites from Highlights to the end of the page.
         """
-        new = [bullet(text) for text in bullets]
-        children, start, section = self._section(page_id, FOCUS_HEADING)
-        if start is not None:
-            self.append(page_id, new, after=children[start]["id"])
-            for block in section:
+        children = self._children(page_id)
+        bullets = [bullet(text) for text in bullets]
+        focus_at = _heading_at(children, FOCUS_HEADING)
+        if focus_at is not None:
+            self.append(page_id, bullets, after=children[focus_at]["id"])
+            for block in _under(children, focus_at):
                 self._call("DELETE", f"/blocks/{block['id']}")
             return
-        new = [heading(FOCUS_HEADING)] + new
-        _, highlights, _ = self._section(page_id, HIGHLIGHTS_HEADING)
-        if highlights is None:
-            self.append(page_id, new)
-        elif highlights > 0:
-            self.append(page_id, new, after=children[highlights - 1]["id"])
+        section = [heading(FOCUS_HEADING)] + bullets
+        highlights_at = _heading_at(children, HIGHLIGHTS_HEADING)
+        if highlights_at is None:
+            self.append(page_id, section)
+        elif highlights_at > 0:
+            self.append(page_id, section, after=children[highlights_at - 1]["id"])
         else:
             raise NotionError("the page starts with Highlights, so there is no place above it")
 
@@ -287,27 +281,16 @@ class Notion:
         highlighted, so a note typed under that heading in Notion is lost. Returns
         whether anything changed.
         """
-        children = self._call("GET", f"/blocks/{page_id}/children?page_size=100")["results"]
-        existing_start = None
-        for index, block in enumerate(children):
-            if block["type"] == "heading_2":
-                text = "".join(
-                    run["plain_text"] for run in block["heading_2"]["rich_text"]
-                )
-                if text.strip() == HIGHLIGHTS_HEADING:
-                    existing_start = index
-                    break
+        children = self._children(page_id)
+        existing_start = _heading_at(children, HIGHLIGHTS_HEADING)
 
         current: list[str] = []
         if existing_start is not None:
-            for block in children[existing_start + 1 :]:
-                if block["type"] == "bulleted_list_item":
-                    current.append(
-                        "".join(
-                            run["plain_text"]
-                            for run in block["bulleted_list_item"]["rich_text"]
-                        )
-                    )
+            current = [
+                _plain(block)
+                for block in children[existing_start + 1 :]
+                if block["type"] == "bulleted_list_item"
+            ]
         if current == list(highlights):
             return False
 
@@ -323,6 +306,28 @@ def _plain(block: dict) -> str:
     """A text block's plain value, from Notion's response."""
     runs = (block.get(block["type"]) or {}).get("rich_text") or []
     return "".join(run.get("plain_text", "") for run in runs)
+
+
+def _heading_at(children: list[dict], title: str) -> int | None:
+    """The index of the ``## title`` heading among a page's blocks."""
+    for index, block in enumerate(children):
+        if block["type"] == "heading_2" and _plain(block).strip() == title:
+            return index
+    return None
+
+
+def _under(children: list[dict], index: int) -> list[dict]:
+    """The blocks after the heading at ``index``, up to the next section heading.
+
+    Only a level 1 or 2 heading ends the section, so a reader's own subheading
+    inside their notes stays part of it.
+    """
+    section = []
+    for block in children[index + 1 :]:
+        if block["type"] in ("heading_1", "heading_2"):
+            break
+        section.append(block)
+    return section
 
 
 def row_text(row: dict, name: str) -> str:

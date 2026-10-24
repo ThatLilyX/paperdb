@@ -539,7 +539,8 @@ def summarize_command(citekeys, force, dry_run, model) -> None:
     With no CITEKEYS, every paper whose section is still empty.
     """
     settings, client = _loaded()
-    written, kept, failed, cost = 0, 0, [], 0.0
+    written, kept, missing, failed, cost = 0, 0, [], [], 0.0
+    started = time.monotonic()
     with client:
         rows = _index(client, settings.database_id)
         unknown = [key for key in citekeys if key not in rows]
@@ -555,7 +556,7 @@ def summarize_command(citekeys, force, dry_run, model) -> None:
                     click.echo(f"kept {key}: it already has focus notes (--force replaces them)")
                 continue
             if key not in on_disk:
-                failed.append(key)
+                missing.append(key)
                 click.secho(f"skipped {key}: no PDF in db/", fg="yellow")
                 continue
             pdf = _primary(on_disk[key], notion.row_text(row, "Filename"))
@@ -563,6 +564,7 @@ def summarize_command(citekeys, force, dry_run, model) -> None:
             try:
                 summary = summarize(pdf, notion.row_text(row, "Name"), model=model)
             except SummarizeError as error:
+                cost += error.cost_usd
                 failed.append(key)
                 click.secho(f"  failed: {error}", fg="red")
                 continue
@@ -575,9 +577,10 @@ def summarize_command(citekeys, force, dry_run, model) -> None:
             click.echo(f"  {summary.seconds:.0f}s, ${summary.cost_usd:.2f}")
 
     verb = "would summarize" if dry_run else "summarized"
+    minutes = (time.monotonic() - started) / 60
     click.echo(
-        f"\n{verb} {written}, kept {kept} with notes, {len(failed)} failed"
-        f" · ${cost:.2f} (Claude Code's list-price figure)"
+        f"\n{verb} {written}, kept {kept} with notes, {len(missing)} with no PDF,"
+        f" {len(failed)} failed · {minutes:.0f} min, ${cost:.2f} (Claude Code's list-price figure)"
     )
     if failed:
         click.secho(f"failed: {', '.join(failed)}", fg="red")

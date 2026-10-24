@@ -56,7 +56,10 @@ def test_claude_reads_the_pdf_itself_with_only_the_read_tool_and_a_budget():
     command = run.calls[0]
     assert command[:2] == ["claude", "-p"]
     assert str(PDF) in command[2], "the prompt names the file to read"
-    assert command[command.index("--allowedTools") + 1] == "Read"
+    assert command[command.index("--tools") + 1] == "Read", "Read is the only tool that exists"
+    assert "--restricted" in command, "file tools confined to the paper's folder"
+    assert "--strict-mcp-config" in command, "none of the user's MCP servers"
+    assert command[command.index("--permission-mode") + 1] == "dontAsk"
     assert command[command.index("--add-dir") + 1] == str(PDF.parent)
     assert command[command.index("--max-budget-usd") + 1] == "0.75"
     assert "--json-schema" in command
@@ -99,6 +102,21 @@ def test_bullets_are_trimmed_and_blank_ones_dropped():
 def test_a_reply_without_usable_bullets_is_an_error_not_an_empty_section(payload, message):
     with pytest.raises(SummarizeError, match=message):
         summarize(PDF, "T", run=reply(payload))
+
+
+@pytest.mark.parametrize("count", [2, 7])
+def test_a_bullet_count_outside_three_to_six_is_refused(count):
+    with pytest.raises(SummarizeError, match="bullets"):
+        summarize(PDF, "T", run=reply(success([f"Point {i}." for i in range(count)])))
+
+
+def test_a_failed_read_still_reports_what_it_cost():
+    payload = {"subtype": "error_max_budget_usd", "is_error": True, "result": "", "total_cost_usd": 3.1}
+
+    with pytest.raises(SummarizeError) as raised:
+        summarize(PDF, "T", run=reply(payload))
+
+    assert raised.value.cost_usd == pytest.approx(3.1)
 
 
 def test_output_that_is_not_json_is_an_error():

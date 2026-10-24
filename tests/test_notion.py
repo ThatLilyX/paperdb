@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -97,8 +99,6 @@ class Recorder:
         self.deleted: list[str] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        import json
-
         if request.method == "GET":
             return httpx.Response(200, json={"results": self.children, "has_more": False})
         if request.method == "PATCH":
@@ -159,3 +159,23 @@ def test_replace_focus_on_a_page_without_the_heading_puts_it_above_highlights():
     assert body["after"] == "b2", "after the abstract quote, before Highlights"
     assert body["children"][0]["heading_2"]["rich_text"][0]["text"]["content"] == "What to focus on"
     assert fake.deleted == []
+
+
+def test_a_subheading_in_the_user_s_focus_notes_stays_inside_the_section():
+    page = PAGE[:4] + [("heading_3", "My take"), ("paragraph", "mine")] + PAGE[5:]
+    fake = Recorder(page)
+
+    assert fake.notion().focus_notes("page") == ["My take", "mine"]
+    fake.notion().replace_focus("page", ["One."])
+    assert fake.deleted == ["b4", "b5"], "the whole section, not just up to the subheading"
+
+
+def test_rows_follows_the_cursor_across_pages():
+    pages = iter([
+        {"results": [{"id": "a"}], "has_more": True, "next_cursor": "c1"},
+        {"results": [{"id": "b"}], "has_more": False},
+    ])
+    client = Notion("t", client=httpx.Client(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=next(pages))
+    )))
+    assert [row["id"] for row in client.rows("db")] == ["a", "b"]

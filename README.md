@@ -93,18 +93,21 @@ folder.
 
 ### summarize
 
-Claude reads the whole PDF, every page, and writes 3–6 one-sentence bullets on
+Claude is asked to read the whole PDF, every page, and writes 3–6 one-sentence bullets on
 what is new in the paper under the page's **What to focus on** heading.
 
 - With no citekeys, it fills every page whose section is still empty. A section
   that already has text is kept; `--force` replaces it.
-- `--dry-run` prints the bullets and writes nothing.
+- `--dry-run` prints the bullets and writes nothing. Claude still reads the
+  papers, so it costs the same.
 - `--model <name>` picks the Claude model; otherwise your Claude Code default.
 
 Each paper prints its time and cost. A 5-page paper took about 30 seconds and
 cost about $0.58 on Opus at list price; on a Claude subscription it counts
-against your usage instead. Claude can only read files in `db/`, never change
-them, and stops at $3 per paper. sync never touches this section.
+against your usage instead. Claude's only tool is reading files in `db/`; it
+can't change them or run anything. Each paper stops at about $3 (the cap is
+checked between steps, so one can run slightly over). sync never touches this
+section.
 
 ### bibtex
 

@@ -19,6 +19,9 @@ CONFIG_PATH = Path(
     / "config.toml"
 )
 DEFAULT_PAPERS_DIR = Path.home() / "Papers"
+# Inside the papers folder: filed papers in one, unprocessed ones in the other.
+LIBRARY_NAME = "db"
+INBOX_NAME = "Inbox"
 TOKEN_ENV = "NOTION_TOKEN"
 
 
@@ -31,6 +34,16 @@ class Config:
     papers_dir: Path
     database_id: str = ""
     email: str = ""
+
+    @property
+    def library_dir(self) -> Path:
+        """Where filed papers live, each named by its citekey."""
+        return self.papers_dir / LIBRARY_NAME
+
+    @property
+    def inbox_dir(self) -> Path:
+        """Where PDFs wait until sync can file them."""
+        return self.papers_dir / INBOX_NAME
 
     @property
     def bib_path(self) -> Path:

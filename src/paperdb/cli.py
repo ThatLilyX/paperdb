@@ -38,6 +38,9 @@ def _loaded() -> tuple[Config, notion.Notion]:
         fail("no database_id in the config. Run `paperdb init` again.")
     if not settings.papers_dir.is_dir():
         fail(f"{settings.papers_dir} does not exist. Run `paperdb init` again.")
+    for place in (settings.library_dir, settings.inbox_dir):
+        if place.exists() and not place.is_dir():
+            fail(f"{place} is a file, but paperdb keeps a folder there. Rename it and run again.")
     return settings, notion.Notion(token)
 
 
@@ -53,6 +56,8 @@ def _index(client: notion.Notion, database_id: str) -> dict[str, dict]:
 
 def _pdfs(folder: Path) -> list[Path]:
     """Every PDF in the folder, whatever the case of its extension."""
+    if not folder.is_dir():
+        return []
     return sorted(p for p in folder.iterdir() if p.suffix.lower() == ".pdf" and p.is_file())
 
 
@@ -76,7 +81,7 @@ def _primary(copies: list[Path], recorded: str = "", wanted: str = "") -> Path:
 
 
 class FolderNames:
-    """The names in the papers folder, as a rename has to see them.
+    """The names in one folder, as a move into it has to see them.
 
     Matched without case, as on macOS, but every spelling is kept, so on a
     case-sensitive disk two names differing only in case still block each other.
@@ -87,14 +92,45 @@ class FolderNames:
         for name in held:
             self._held.setdefault(name.casefold(), set()).add(name)
 
-    def taken_by(self, wanted: str, current: str) -> str | None:
-        """The other file already holding ``wanted``, if there is one."""
+    def taken_by(self, wanted: str, current: str | None = None) -> str | None:
+        """The other file already holding ``wanted``, if there is one.
+
+        ``current`` is the moving file's own name when it is already in this
+        folder, and None when it is arriving from another.
+        """
         others = self._held.get(wanted.casefold(), set()) - {current}
         return min(others) if others else None
 
-    def move(self, current: str, wanted: str) -> None:
-        self._held[current.casefold()].discard(current)
-        self._held.setdefault(wanted.casefold(), set()).add(wanted)
+    def leave(self, name: str) -> None:
+        self._held[name.casefold()].discard(name)
+
+    def arrive(self, name: str) -> None:
+        self._held.setdefault(name.casefold(), set()).add(name)
+
+
+# Where a deleted duplicate goes: the Trash, so a mistake can be undone.
+TRASH = Path.home() / ".Trash"
+
+
+def _discard(pdf: Path) -> Path:
+    """Move ``pdf`` to the Trash under a name nothing there already has."""
+    target = TRASH / pdf.name
+    n = 1
+    while target.exists():
+        target = TRASH / f"{pdf.stem} (paperdb {n}){pdf.suffix}"
+        n += 1
+    _move(pdf, target)
+    return target
+
+
+def _redundant(copy: Path, kept: Path) -> bool:
+    """Whether deleting ``copy`` loses nothing that ``kept`` does not hold.
+
+    The same bytes, or every highlight in the copy already in the kept file.
+    """
+    if copy.read_bytes() == kept.read_bytes():
+        return True
+    return set(extract(copy)) <= set(extract(kept))
 
 
 def _move(source: Path, target: Path) -> None:
@@ -124,6 +160,8 @@ def init(folder, parent_page, database_id, schedule_db, email) -> None:
     """Point paperdb at a papers folder and a Notion database."""
     papers_dir = (folder or config.DEFAULT_PAPERS_DIR).expanduser().resolve()
     papers_dir.mkdir(parents=True, exist_ok=True)
+    (papers_dir / config.LIBRARY_NAME).mkdir(exist_ok=True)
+    (papers_dir / config.INBOX_NAME).mkdir(exist_ok=True)
 
     if not database_id and not parent_page:
         fail("pass --parent-page <notion page id> to create the database, or --database <id>.")
@@ -159,7 +197,9 @@ def add(identifier, forced_key, no_download) -> None:
         except ResolveError as error:
             fail(str(error))
 
-        on_disk = _by_key(_pdfs(settings.papers_dir))
+        library = settings.library_dir
+        # A filed paper may still be loose in the papers folder until the next sync.
+        on_disk = _by_key(_pdfs(library) + _pdfs(settings.papers_dir))
         taken = set(_index(client, settings.database_id))
         if forced_key is not None:
             if not is_citekey(forced_key):
@@ -182,27 +222,29 @@ def add(identifier, forced_key, no_download) -> None:
                 )
 
         filename = names.build(paper.citekey, paper.title)
-        destination = settings.papers_dir / filename
+        destination = library / filename
         recorded = ""
         highlights: list[str] = []
 
         if paper.citekey in on_disk:
             # The file is already here, usually an orphan sync reported. Record it
             # rather than download over it and lose its highlights.
-            recorded = _primary(on_disk[paper.citekey], wanted=filename).name
-            highlights = extract(settings.papers_dir / recorded)
+            own = _primary(on_disk[paper.citekey], wanted=filename)
+            recorded = own.name
+            highlights = extract(own)
             click.echo(f"using {recorded}, already in the folder")
         elif not no_download:
             if not paper.pdf_url:
                 click.secho(
                     "no open-access PDF is on offer for this paper. Recording the row "
-                    "without a file; download it yourself into the folder as "
+                    f"without a file; save it into {settings.inbox_dir} as "
                     f"{filename!r} and run `paperdb sync`.",
                     fg="yellow",
                 )
             else:
                 try:
                     data = fetch_pdf(paper.pdf_url)
+                    library.mkdir(parents=True, exist_ok=True)
                     with destination.open("xb") as out:
                         out.write(data)
                     recorded = filename
@@ -232,158 +274,257 @@ def sync(dry_run, no_highlights) -> None:
     orphan_files: list[str] = []
     orphan_rows: list[str] = []
     conflicts: list[str] = []
+    unidentified = False
 
-    folder = settings.papers_dir
+    folder = settings.library_dir
+    inbox = settings.inbox_dir
+    library_label = f"{config.LIBRARY_NAME}/"
+    inbox_label = f"{config.INBOX_NAME}/"
+    if not dry_run:
+        folder.mkdir(exist_ok=True)
+        inbox.mkdir(exist_ok=True)
 
-    with client:
-        rows = _index(client, settings.database_id)
-        seen: set[str] = set()
-        pdfs = _pdfs(folder)
-        keyed = _by_key(pdfs)
-        held = FolderNames(p.name for p in pdfs)
-        by_identity = {
-            i: key for key, r in rows.items() for i in notion.row_paper(r).identities()
-        }
+    rows = _index(client, settings.database_id)
+    seen: set[str] = set()
+    filed: dict[str, Path] = {}  # each row's own file, where it is now
+    pdfs = _pdfs(folder)
+    # Loose in Papers/ itself: filed papers from before db/ existed, or drops.
+    loose = _pdfs(settings.papers_dir)
+    keyed = _by_key(pdfs + loose)
+    waiting = _pdfs(inbox)
+    # Keys an inbox file already carries are spoken for, row or not.
+    reserved = set(keyed) | {k for k in map(names.citekey_in, (p.name for p in waiting)) if k}
+    held = FolderNames(p.name for p in pdfs)
+    held_in_inbox = FolderNames(p.name for p in waiting)
+    by_identity = {i: key for key, r in rows.items() for i in notion.row_paper(r).identities()}
+    # Files that are in the inbox, or would be: in a dry run nothing moves, but
+    # each file is reported from where it would be.
+    inboxed = set(waiting)
+    shown = {pdf: inbox_label + pdf.name for pdf in waiting}
+    shown.update({pdf: library_label + pdf.name for pdf in pdfs})
 
-        def taken(pdf: Path, wanted: str, holder: str) -> None:
-            conflicts.append(f"{pdf.name}  (wants {wanted}, already taken by {holder})")
+    def name_of(pdf: Path) -> str:
+        return shown.get(pdf, pdf.name)
 
-        def place(pdf: Path, wanted: str, verb: str) -> Path | None:
-            """Rename ``pdf`` to ``wanted``, or report why not and return None."""
-            holder = held.taken_by(wanted, pdf.name)
-            if holder is None and not dry_run:
-                try:
-                    _move(pdf, folder / wanted)
-                except FileExistsError:
-                    holder = wanted
-            if holder:
-                taken(pdf, wanted, holder)
-                return None
-            plan.append(f"{verb}{pdf.name}  ->  {wanted}")
-            held.move(pdf.name, wanted)
-            return folder / wanted
-
-        def settle(pdf: Path, key: str, verb: str) -> None:
-            """Bind ``pdf`` to its row: name, Filename and highlights."""
-            row = rows[key]
-            seen.add(key)
-            wanted = names.build(key, notion.row_text(row, "Name"))
-            if pdf.name != wanted:
-                moved = place(pdf, wanted, verb)
-                if moved is None:
-                    return
-                if not dry_run:
-                    client.set_filename(row["id"], wanted)
-                    pdf = moved
-            elif notion.row_text(row, "Filename") != pdf.name:
-                plan.append(f"repair  Filename for {key}")
-                if not dry_run:
-                    client.set_filename(row["id"], pdf.name)
-            if not no_highlights:
-                found = extract(pdf)
-                if dry_run:
-                    if found:
-                        plan.append(f"check   highlights for {key} ({len(found)} found)")
-                elif client.replace_highlights(row["id"], found):
-                    plan.append(f"update  highlights for {key} ({len(found)})")
-
-        # Keyed files first, so every row's own file is bound before an unkeyed
-        # copy of the same paper can claim it.
-        for key, copies in sorted(keyed.items()):
-            if key not in rows:
-                for pdf in copies:
-                    orphan_files.append(f"{pdf.name}  (keyed {key}, no row in Notion)")
-                continue
-            row = rows[key]
-            own = _primary(
-                copies,
-                recorded=notion.row_text(row, "Filename"),
-                wanted=names.build(key, notion.row_text(row, "Name")),
-            )
-            for pdf in copies:
-                if pdf != own:
-                    conflicts.append(f"{pdf.name}  (another copy of {key}, which has {own.name})")
-            settle(own, key, "rename  ")
-
-        fetched_from_arxiv = False
-        for pdf in (p for p in pdfs if not names.citekey_in(p.name)):
-            identifier = identify.identify(pdf)
-            if not identifier:
-                orphan_files.append(f"{pdf.name}  (no identifier in the name or the file)")
-                continue
-
-            if classify(identifier)[0] == "arxiv" and fetched_from_arxiv:
-                time.sleep(0 if dry_run else ARXIV_CRAWL_DELAY_SECONDS)
-            try:
-                paper = resolve(identifier, email=settings.email)
-                fetched_from_arxiv = fetched_from_arxiv or classify(identifier)[0] == "arxiv"
-            except ResolveError as error:
-                orphan_files.append(f"{pdf.name}  ({error})")
-                continue
-
-            known = next(
-                (by_identity[i] for i in sorted(paper.identities()) if i in by_identity), None
-            )
-            if known in seen:
-                conflicts.append(f"{pdf.name}  (another copy of {known}, which has a file)")
-                continue
-            if known:
-                # Already in the database: bind the file to that row, never a second one.
-                settle(pdf, known, "adopt   ")
-                continue
-
-            try:
-                paper.citekey = mint(
-                    paper.first_author, paper.year, paper.title, set(rows) | seen | set(keyed)
-                )
-            except CitekeyError as error:
-                orphan_files.append(f"{pdf.name}  ({error})")
-                continue
-
-            wanted = names.build(paper.citekey, paper.title)
-            holder = held.taken_by(wanted, pdf.name)
-            if holder:
-                taken(pdf, wanted, holder)
-                continue
-            plan.append(f"adopt   {pdf.name}  ->  {wanted}")
-            held.move(pdf.name, wanted)
-            seen.add(paper.citekey)
-            by_identity.update(dict.fromkeys(paper.identities(), paper.citekey))
-            if not dry_run:
-                # The row first: if Notion fails, the file keeps its old name and the
-                # next sync binds it to the row by its identifier.
-                found = [] if no_highlights else extract(pdf)
-                client.create_row(settings.database_id, paper, wanted, found)
-                try:
-                    _move(pdf, folder / wanted)
-                except FileExistsError:
-                    taken(pdf, wanted, wanted)
-
-        for key, row in rows.items():
-            if key not in seen:
-                orphan_rows.append(f"{key}  {notion.row_text(row, 'Name')[:60]}")
-
-    verb = "would" if dry_run else "did"
-    click.echo(f"{len(plan)} change(s) paperdb {verb} make:")
-    for line in plan or ["  (nothing)"]:
-        click.echo(f"  {line}")
-
-    if orphan_files:
-        click.secho(f"\n{len(orphan_files)} file(s) with no row:", fg="yellow")
-        for line in orphan_files:
-            click.echo(f"  {line}")
-        click.echo("  Add one by hand with: paperdb add <id> --citekey <key>")
-    if conflicts:
-        click.secho(
-            f"\n{len(conflicts)} file(s) left alone, so nothing is overwritten:", fg="yellow"
+    def taken(pdf: Path, wanted: str, holder: str) -> None:
+        conflicts.append(
+            f"{name_of(pdf)}  (wants {library_label}{wanted}, "
+            f"already taken by {library_label}{holder})"
         )
-        for line in conflicts:
+
+    def to_inbox(pdf: Path) -> None:
+        """Move ``pdf`` into the inbox to be processed, or report why not."""
+        holder = held_in_inbox.taken_by(pdf.name)
+        if holder is None and not dry_run:
+            try:
+                _move(pdf, inbox / pdf.name)
+            except FileExistsError:
+                holder = pdf.name
+        if holder:
+            conflicts.append(
+                f"{name_of(pdf)}  (wants {inbox_label}, already taken by {inbox_label}{holder})"
+            )
+            return
+        plan.append(f"inbox   {name_of(pdf)}  ->  {inbox_label}")
+        if pdf.parent == folder:
+            held.leave(pdf.name)
+        held_in_inbox.arrive(pdf.name)
+        moved = pdf if dry_run else inbox / pdf.name
+        inboxed.add(moved)
+        shown[moved] = inbox_label + pdf.name
+        waiting.append(moved)
+
+    def place(pdf: Path, wanted: str, verb: str) -> Path | None:
+        """Move ``pdf`` into the library as ``wanted``, or report why not."""
+        current = pdf.name if pdf.parent == folder and pdf not in inboxed else None
+        holder = held.taken_by(wanted, current)
+        if holder is None and not dry_run:
+            try:
+                _move(pdf, folder / wanted)
+            except FileExistsError:
+                holder = wanted
+        if holder:
+            taken(pdf, wanted, holder)
+            return None
+        plan.append(f"{verb}{name_of(pdf)}  ->  {library_label}{wanted}")
+        if current:
+            held.leave(current)
+        held.arrive(wanted)
+        shown[folder / wanted] = library_label + wanted
+        return folder / wanted
+
+    def settle(pdf: Path, key: str, verb: str) -> None:
+        """Bind ``pdf`` to its row: place in the library, Filename, highlights."""
+        row = rows[key]
+        seen.add(key)
+        wanted = names.build(key, notion.row_text(row, "Name"))
+        if pdf != folder / wanted:
+            moved = place(pdf, wanted, verb)
+            if moved is None:
+                return
+            if not dry_run:
+                if notion.row_text(row, "Filename") != wanted:
+                    client.set_filename(row["id"], wanted)
+                pdf = moved
+            filed[key] = pdf
+        elif notion.row_text(row, "Filename") != pdf.name:
+            plan.append(f"repair  Filename for {key}")
+            if not dry_run:
+                client.set_filename(row["id"], pdf.name)
+        filed.setdefault(key, pdf)
+        if not no_highlights:
+            found = extract(pdf)
+            if dry_run:
+                if found:
+                    plan.append(f"check   highlights for {key} ({len(found)} found)")
+            elif client.replace_highlights(row["id"], found):
+                plan.append(f"update  highlights for {key} ({len(found)})")
+
+    def report() -> None:
+        verb = "would" if dry_run else "did"
+        click.echo(f"{len(plan)} change(s) paperdb {verb} make:")
+        for line in plan or ["  (nothing)"]:
             click.echo(f"  {line}")
-        click.echo("  Usually a duplicate download. Keep the one you want and delete the other.")
-    if orphan_rows:
-        click.secho(f"\n{len(orphan_rows)} row(s) with no file:", fg="yellow")
-        for line in orphan_rows:
-            click.echo(f"  {line}")
+        if orphan_files:
+            click.secho(f"\n{len(orphan_files)} file(s) with no row:", fg="yellow")
+            for line in orphan_files:
+                click.echo(f"  {line}")
+            if unidentified:
+                click.echo(
+                    f"  Rename it in {inbox_label} to its arXiv id (2305.18290.pdf) or its DOI "
+                    "with _ for / (10.1038_nature12373.pdf), then sync again."
+                )
+        if conflicts:
+            click.secho(
+                f"\n{len(conflicts)} file(s) left alone, so nothing is overwritten:", fg="yellow"
+            )
+            for line in conflicts:
+                click.echo(f"  {line}")
+            click.echo(
+                "  Usually a duplicate download. Keep the one you want and delete the other."
+            )
+        if orphan_rows:
+            click.secho(f"\n{len(orphan_rows)} row(s) with no file:", fg="yellow")
+            for line in orphan_rows:
+                click.echo(f"  {line}")
+
+    def keyed_orphan(pdf: Path, key: str) -> None:
+        orphan_files.append(
+            f"{name_of(pdf)}  (keyed {key}, no row in Notion: "
+            f"paperdb add <id> --citekey {key} records this file)"
+        )
+
+    def dedupe(pdf: Path, key: str) -> None:
+        """Delete a copy of a filed paper, unless it holds something the filed one lacks."""
+        kept = filed.get(key)
+        if kept is not None and _redundant(pdf, kept):
+            plan.append(f"delete  {name_of(pdf)}  (copy of {name_of(kept)}; moved to Trash)")
+            if not dry_run:
+                _discard(pdf)
+            return
+        why = "highlights the filed copy lacks" if kept is not None else "which has a file"
+        if pdf in inboxed:
+            conflicts.append(f"{name_of(pdf)}  (another copy of {key}, {why})")
+        else:
+            to_inbox(pdf)
+
+    try:
+        with client:
+            # Anything unprocessed outside the inbox goes there first, so the
+            # library only ever holds filed papers.
+            for pdf in pdfs + loose:
+                if not names.citekey_in(pdf.name):
+                    to_inbox(pdf)
+
+            # Keyed files next, so every row's own file is bound before an inbox
+            # copy of the same paper can claim it. Extra copies wait in the inbox.
+            for key, copies in sorted(keyed.items()):
+                if key not in rows:
+                    for pdf in copies:
+                        keyed_orphan(pdf, key)
+                    continue
+                row = rows[key]
+                own = _primary(
+                    copies,
+                    recorded=notion.row_text(row, "Filename"),
+                    wanted=names.build(key, notion.row_text(row, "Name")),
+                )
+                settle(own, key, "rename  " if own.parent == folder else "file    ")
+                for pdf in copies:
+                    if pdf != own:
+                        dedupe(pdf, key)
+
+            fetched_from_arxiv = False
+            for pdf in waiting:
+                key = names.citekey_in(pdf.name)
+                if key:
+                    if key in seen:
+                        dedupe(pdf, key)
+                    elif key in rows:
+                        settle(pdf, key, "file    ")
+                    else:
+                        keyed_orphan(pdf, key)
+                    continue
+
+                identifier = identify.identify(pdf)
+                if not identifier:
+                    orphan_files.append(f"{name_of(pdf)}  (no identifier in the name or the file)")
+                    unidentified = True
+                    continue
+
+                if classify(identifier)[0] == "arxiv" and fetched_from_arxiv:
+                    time.sleep(0 if dry_run else ARXIV_CRAWL_DELAY_SECONDS)
+                try:
+                    paper = resolve(identifier, email=settings.email)
+                    fetched_from_arxiv = fetched_from_arxiv or classify(identifier)[0] == "arxiv"
+                except ResolveError as error:
+                    orphan_files.append(f"{name_of(pdf)}  ({error})")
+                    continue
+
+                known = next(
+                    (by_identity[i] for i in sorted(paper.identities()) if i in by_identity), None
+                )
+                if known in seen:
+                    dedupe(pdf, known)
+                    continue
+                if known:
+                    # Already in the database: bind the file to that row, never a second one.
+                    settle(pdf, known, "adopt   ")
+                    continue
+
+                try:
+                    paper.citekey = mint(
+                        paper.first_author, paper.year, paper.title, set(rows) | seen | reserved
+                    )
+                except CitekeyError as error:
+                    orphan_files.append(f"{name_of(pdf)}  ({error})")
+                    continue
+
+                wanted = names.build(paper.citekey, paper.title)
+                holder = held.taken_by(wanted)
+                if holder:
+                    taken(pdf, wanted, holder)
+                    continue
+                plan.append(f"adopt   {name_of(pdf)}  ->  {library_label}{wanted}")
+                held.arrive(wanted)
+                seen.add(paper.citekey)
+                by_identity.update(dict.fromkeys(paper.identities(), paper.citekey))
+                if not dry_run:
+                    # The row first: if Notion fails, the file stays in the inbox
+                    # and the next sync binds it to the row by its identifier.
+                    found = [] if no_highlights else extract(pdf)
+                    client.create_row(settings.database_id, paper, wanted, found)
+                    try:
+                        _move(pdf, folder / wanted)
+                    except FileExistsError:
+                        taken(pdf, wanted, wanted)
+
+            for key, row in rows.items():
+                if key not in seen:
+                    orphan_rows.append(f"{key}  {notion.row_text(row, 'Name')[:60]}")
+    finally:
+        # Printed even when Notion fails part-way, so moves already made are seen.
+        report()
 
 
 @main.command(name="bibtex")

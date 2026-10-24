@@ -17,10 +17,16 @@ from paperdb.citekey import CitekeyError, is_citekey, keyword_of, mint, surname_
         ("Petter N Kolm", "kolm"),
         ("J. R. R. Tolkien", "tolkien"),
         ("Jan C. van den Berg", "vandenberg"),
+        ("Abdul Fatir Ansari", "ansari"),
+        ("Ludwig van Beethoven", "vanbeethoven"),
+        ("Leonardo da Vinci", "davinci"),
+        ("Jean-Pierre Smith-Jones", "smithjones"),
+        ("Kipf T. N.", "kipf"),
     ],
     ids=[
         "given-family", "family-comma", "particle-comma", "particle-plain", "accent", "mononym",
         "apostrophe", "middle-initial", "initial-no-dot", "initials-only-given", "initial-and-particle",
+        "two-given-names", "particle-von", "particle-da", "hyphenated", "trailing-initials",
     ],
 )
 def test_surname_is_stable_across_conventions(author, expected):

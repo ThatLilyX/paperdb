@@ -83,3 +83,79 @@ def test_an_error_body_reaches_the_caller():
     )))
     with pytest.raises(NotionError, match="Citekey is not a property"):
         bad._call("POST", "/pages", json={})
+
+
+class Recorder:
+    """A fake Notion transport that serves one page body and records every write."""
+
+    def __init__(self, blocks: list[tuple[str, str]]):
+        self.children = [
+            {"id": f"b{i}", "type": kind, kind: {"rich_text": [{"plain_text": text}]}}
+            for i, (kind, text) in enumerate(blocks)
+        ]
+        self.appended: list[dict] = []
+        self.deleted: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        if request.method == "GET":
+            return httpx.Response(200, json={"results": self.children, "has_more": False})
+        if request.method == "PATCH":
+            body = json.loads(request.content)
+            self.appended.append(body)
+            created = [{"id": f"new{len(self.appended)}-{i}"} for i, _ in enumerate(body["children"])]
+            return httpx.Response(200, json={"results": created})
+        if request.method == "DELETE":
+            self.deleted.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(200, json={})
+        raise AssertionError(request)
+
+    def notion(self) -> Notion:
+        return Notion("t", client=httpx.Client(transport=httpx.MockTransport(self)))
+
+
+PAGE = [
+    ("heading_2", "Abstract"),
+    ("paragraph", "Ada Lastname · arXiv · 2023"),
+    ("quote", "An abstract."),
+    ("heading_2", "What to focus on"),
+    ("paragraph", ""),
+    ("heading_2", "Highlights"),
+    ("bulleted_list_item", "a highlight"),
+]
+
+
+def _bullet_texts(body: dict) -> list[str]:
+    return [b["bulleted_list_item"]["rich_text"][0]["text"]["content"] for b in body["children"]]
+
+
+def test_an_untouched_focus_section_reads_as_empty():
+    assert Recorder(PAGE).notion().focus_notes("page") == []
+
+
+def test_focus_notes_are_the_texts_between_the_heading_and_the_next_heading():
+    page = PAGE[:4] + [("bulleted_list_item", "mine"), ("paragraph", "also mine")] + PAGE[5:]
+    assert Recorder(page).notion().focus_notes("page") == ["mine", "also mine"]
+
+
+def test_replace_focus_inserts_after_the_heading_then_clears_the_old_section():
+    fake = Recorder(PAGE)
+
+    fake.notion().replace_focus("page", ["One.", "Two."])
+
+    assert fake.appended[0]["after"] == "b3", "right under 'What to focus on'"
+    assert _bullet_texts(fake.appended[0]) == ["One.", "Two."]
+    assert fake.deleted == ["b4"], "only the old section; Highlights untouched"
+
+
+def test_replace_focus_on_a_page_without_the_heading_puts_it_above_highlights():
+    """Sync rewrites from Highlights to the end, so focus notes below it would be lost."""
+    fake = Recorder([b for b in PAGE if b[1] not in ("What to focus on", "")])
+
+    fake.notion().replace_focus("page", ["One."])
+
+    body = fake.appended[0]
+    assert body["after"] == "b2", "after the abstract quote, before Highlights"
+    assert body["children"][0]["heading_2"]["rich_text"][0]["text"]["content"] == "What to focus on"
+    assert fake.deleted == []

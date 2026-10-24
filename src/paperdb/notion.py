@@ -210,13 +210,58 @@ class Notion:
     def set_filename(self, page_id: str, filename: str) -> None:
         self.update_row(page_id, {"Filename": {"rich_text": _rich(filename)}})
 
-    def append(self, page_id: str, blocks: list[dict]) -> None:
+    def append(self, page_id: str, blocks: list[dict], after: str | None = None) -> None:
+        """Add blocks at the end of a page, or right after the block ``after``."""
         for start in range(0, len(blocks), CHILDREN_PER_REQUEST):
-            self._call(
-                "PATCH",
-                f"/blocks/{page_id}/children",
-                json={"children": blocks[start : start + CHILDREN_PER_REQUEST]},
-            )
+            payload = {"children": blocks[start : start + CHILDREN_PER_REQUEST]}
+            if after:
+                payload["after"] = after
+            created = self._call("PATCH", f"/blocks/{page_id}/children", json=payload)
+            if after and created.get("results"):
+                after = created["results"][-1]["id"]
+
+    # -- focus notes -----------------------------------------------------------
+
+    def _section(self, page_id: str, title: str) -> tuple[list[dict], int | None, list[dict]]:
+        """The page's blocks, the index of heading ``title``, and the blocks under it."""
+        children = self._call("GET", f"/blocks/{page_id}/children?page_size=100")["results"]
+        for index, block in enumerate(children):
+            if block["type"] == "heading_2" and _plain(block).strip() == title:
+                section = []
+                for below in children[index + 1 :]:
+                    if below["type"].startswith("heading"):
+                        break
+                    section.append(below)
+                return children, index, section
+        return children, None, []
+
+    def focus_notes(self, page_id: str) -> list[str]:
+        """The non-empty lines under "What to focus on". The empty heading reads as []."""
+        _, _, section = self._section(page_id, FOCUS_HEADING)
+        return [text for text in (_plain(b).strip() for b in section) if text]
+
+    def replace_focus(self, page_id: str, bullets) -> None:
+        """Make ``bullets`` the whole of the "What to focus on" section.
+
+        The new bullets go in before the old section is removed, so a failure part
+        way leaves both rather than neither. A page without the heading gets it
+        above Highlights: sync rewrites from Highlights to the end of the page.
+        """
+        new = [bullet(text) for text in bullets]
+        children, start, section = self._section(page_id, FOCUS_HEADING)
+        if start is not None:
+            self.append(page_id, new, after=children[start]["id"])
+            for block in section:
+                self._call("DELETE", f"/blocks/{block['id']}")
+            return
+        new = [heading(FOCUS_HEADING)] + new
+        _, highlights, _ = self._section(page_id, HIGHLIGHTS_HEADING)
+        if highlights is None:
+            self.append(page_id, new)
+        elif highlights > 0:
+            self.append(page_id, new, after=children[highlights - 1]["id"])
+        else:
+            raise NotionError("the page starts with Highlights, so there is no place above it")
 
     def rows(self, database_id: str):
         """Every row, paged."""
@@ -272,6 +317,12 @@ class Notion:
         if highlights:
             self.append(page_id, [heading(HIGHLIGHTS_HEADING)] + [bullet(h) for h in highlights])
         return True
+
+
+def _plain(block: dict) -> str:
+    """A text block's plain value, from Notion's response."""
+    runs = (block.get(block["type"]) or {}).get("rich_text") or []
+    return "".join(run.get("plain_text", "") for run in runs)
 
 
 def row_text(row: dict, name: str) -> str:

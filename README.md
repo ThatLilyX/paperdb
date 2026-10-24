@@ -25,7 +25,8 @@ your folder; nothing is uploaded to Notion.
 
 ## Setup
 
-Requires Python 3.11 or newer and a Notion integration token.
+Requires Python 3.11 or newer and a Notion integration token. `summarize` also
+needs [Claude Code](https://claude.com/claude-code), logged in.
 
 ```
 pip install -e .
@@ -45,6 +46,7 @@ the database under it. To use a database you already have, pass
 | `paperdb init [FOLDER]` | Set up the papers folder and the Notion database |
 | `paperdb add <ID>` | Add one paper by arXiv id, DOI, or arxiv.org / doi.org link |
 | `paperdb sync` | Bring the folder and the database back in step |
+| `paperdb summarize [CITEKEY...]` | Have Claude read each paper and fill in "What to focus on" |
 | `paperdb bibtex` | Write `library.bib` into `~/Papers` |
 
 `paperdb <command> --help` lists every option.
@@ -88,6 +90,21 @@ it is and is listed.
 
 `--no-highlights` skips reading annotations, which is the slow part on a large
 folder.
+
+### summarize
+
+Claude reads the whole PDF, every page, and writes 3–6 one-sentence bullets on
+what is new in the paper under the page's **What to focus on** heading.
+
+- With no citekeys, it fills every page whose section is still empty. A section
+  that already has text is kept; `--force` replaces it.
+- `--dry-run` prints the bullets and writes nothing.
+- `--model <name>` picks the Claude model; otherwise your Claude Code default.
+
+Each paper prints its time and cost. A 5-page paper took about 30 seconds and
+cost about $0.58 on Opus at list price; on a Claude subscription it counts
+against your usage instead. Claude can only read files in `db/`, never change
+them, and stops at $3 per paper. sync never touches this section.
 
 ### bibtex
 

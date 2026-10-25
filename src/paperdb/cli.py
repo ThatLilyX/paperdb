@@ -1,4 +1,4 @@
-"""The command line: init, add, sync, bibtex."""
+"""The command line: init, add, sync, summarize, bibtex."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .metadata import (
     fetch_pdf,
     resolve,
 )
+from .summarize import SummarizeError, summarize
 
 
 def fail(message: str) -> None:
@@ -525,6 +526,65 @@ def sync(dry_run, no_highlights) -> None:
     finally:
         # Printed even when Notion fails part-way, so moves already made are seen.
         report()
+
+
+@main.command(name="summarize")
+@click.argument("citekeys", nargs=-1)
+@click.option("--force", is_flag=True, help="Replace focus notes that already have text.")
+@click.option("--dry-run", is_flag=True, help="Print the bullets and write nothing.")
+@click.option("--model", help="Claude model to read with. Defaults to your Claude Code default.")
+def summarize_command(citekeys, force, dry_run, model) -> None:
+    """Have Claude read each paper and fill in "What to focus on".
+
+    With no CITEKEYS, every paper whose section is still empty.
+    """
+    settings, client = _loaded()
+    written, kept, missing, failed, cost = 0, 0, [], [], 0.0
+    started = time.monotonic()
+    with client:
+        rows = _index(client, settings.database_id)
+        unknown = [key for key in citekeys if key not in rows]
+        if unknown:
+            fail(f"no row for {', '.join(unknown)}")
+        on_disk = _by_key(_pdfs(settings.library_dir))
+
+        for key in citekeys or sorted(rows):
+            row = rows[key]
+            if client.focus_notes(row["id"]) and not force:
+                kept += 1
+                if citekeys:
+                    click.echo(f"kept {key}: it already has focus notes (--force replaces them)")
+                continue
+            if key not in on_disk:
+                missing.append(key)
+                click.secho(f"skipped {key}: no PDF in db/", fg="yellow")
+                continue
+            pdf = _primary(on_disk[key], notion.row_text(row, "Filename"))
+            click.echo(f"reading {key} ...")
+            try:
+                summary = summarize(pdf, notion.row_text(row, "Name"), model=model)
+            except SummarizeError as error:
+                cost += error.cost_usd
+                failed.append(key)
+                click.secho(f"  failed: {error}", fg="red")
+                continue
+            cost += summary.cost_usd
+            for text in summary.bullets:
+                click.echo(f"  - {text}")
+            if not dry_run:
+                client.replace_focus(row["id"], summary.bullets)
+            written += 1
+            click.echo(f"  {summary.seconds:.0f}s, ${summary.cost_usd:.2f}")
+
+    verb = "would summarize" if dry_run else "summarized"
+    minutes = (time.monotonic() - started) / 60
+    click.echo(
+        f"\n{verb} {written}, kept {kept} with notes, {len(missing)} with no PDF,"
+        f" {len(failed)} failed · {minutes:.0f} min, ${cost:.2f} (Claude Code's list-price figure)"
+    )
+    if failed:
+        click.secho(f"failed: {', '.join(failed)}", fg="red")
+        sys.exit(1)
 
 
 @main.command(name="bibtex")

@@ -13,6 +13,7 @@ from paperdb import cli, config
 from paperdb.config import Config
 from paperdb.metadata import Paper, ResolveError
 from paperdb.notion import _rich
+from paperdb.summarize import Summary, SummarizeError
 
 PDF = b"%PDF-1.7\n%%EOF\n"
 
@@ -881,3 +882,148 @@ def test_a_deleted_copy_never_replaces_a_file_already_in_the_trash(wired, folder
 
     assert (trash / copy.name).read_bytes() == b"already binned"
     assert sorted(p.read_bytes() for p in trash.iterdir()) == [PDF + b"copy", b"already binned"]
+
+
+# -- summarize -----------------------------------------------------------------
+
+
+
+class FocusNotion(FakeNotion):
+    def __init__(self, rows, notes=None):
+        super().__init__(rows)
+        self.notes: dict[str, list[str]] = dict(notes or {})
+        self.written: dict[str, list[str]] = {}
+
+    def focus_notes(self, page_id):
+        return list(self.notes.get(page_id, []))
+
+    def replace_focus(self, page_id, bullets):
+        self.written[page_id] = list(bullets)
+
+
+@pytest.fixture
+def reader(monkeypatch):
+    """Stands in for the Claude CLI; records which PDFs were read."""
+    read: list[str] = []
+
+    def install(fail_on=()):
+        def fake(pdf, title, model=None, **_):
+            read.append(pdf.name)
+            if any(key in pdf.name for key in fail_on):
+                raise SummarizeError("Not logged in", cost_usd=0.25)
+            return Summary(bullets=[f"New idea in {title}."], cost_usd=0.5, seconds=3.0)
+
+        monkeypatch.setattr(cli, "summarize", fake)
+        return read
+
+    return install
+
+
+def summarize_run(*args):
+    return CliRunner().invoke(cli.main, ["summarize", *args])
+
+
+def focus_wired(wired, monkeypatch, rows, notes=None) -> FocusNotion:
+    wired([])  # points config and token at the temp folder
+    focus = FocusNotion(rows, notes)
+    monkeypatch.setattr(cli.notion, "Notion", lambda token: focus)
+    return focus
+
+
+def test_summarize_fills_only_the_empty_sections(wired, monkeypatch, folder, reader):
+    for key, title in (("smith2024graph", "Graph"), ("jones2023deep", "Deep")):
+        (folder / f"{key} {title}.pdf").write_bytes(PDF)
+    fake = focus_wired(
+        wired, monkeypatch,
+        [row("smith2024graph", "Graph", "smith2024graph Graph.pdf"),
+         row("jones2023deep", "Deep", "jones2023deep Deep.pdf")],
+        notes={"page-jones2023deep": ["my own note"]},
+    )
+    read = reader()
+
+    result = summarize_run()
+
+    assert result.exit_code == 0, result.output
+    assert fake.written == {"page-smith2024graph": ["New idea in Graph."]}
+    assert read == ["smith2024graph Graph.pdf"], "a section with notes costs nothing"
+    assert "$0.50" in result.output
+
+
+def test_force_replaces_existing_notes(wired, monkeypatch, folder, reader):
+    (folder / "jones2023deep Deep.pdf").write_bytes(PDF)
+    fake = focus_wired(
+        wired, monkeypatch, [row("jones2023deep", "Deep", "jones2023deep Deep.pdf")],
+        notes={"page-jones2023deep": ["old"]},
+    )
+    reader()
+
+    result = summarize_run("--force")
+
+    assert result.exit_code == 0, result.output
+    assert fake.written == {"page-jones2023deep": ["New idea in Deep."]}
+
+
+def test_a_named_paper_with_notes_is_kept_and_says_how_to_replace_them(wired, monkeypatch, folder, reader):
+    (folder / "jones2023deep Deep.pdf").write_bytes(PDF)
+    fake = focus_wired(
+        wired, monkeypatch, [row("jones2023deep", "Deep", "jones2023deep Deep.pdf")],
+        notes={"page-jones2023deep": ["old"]},
+    )
+    reader()
+
+    result = summarize_run("jones2023deep")
+
+    assert fake.written == {}
+    assert "--force" in result.output
+
+
+def test_summarize_dry_run_prints_the_bullets_and_writes_nothing(wired, monkeypatch, folder, reader):
+    (folder / "smith2024graph Graph.pdf").write_bytes(PDF)
+    fake = focus_wired(wired, monkeypatch, [row("smith2024graph", "Graph", "smith2024graph Graph.pdf")])
+    reader()
+
+    result = summarize_run("--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert fake.written == {}
+    assert "New idea in Graph." in result.output
+
+
+def test_an_unknown_citekey_is_refused_before_anything_is_read(wired, monkeypatch, folder, reader):
+    focus_wired(wired, monkeypatch, [row("smith2024graph", "Graph", "smith2024graph Graph.pdf")])
+    read = reader()
+
+    result = summarize_run("nobody2020nothing")
+
+    assert result.exit_code != 0
+    assert "nobody2020nothing" in result.output
+    assert read == []
+
+
+def test_one_failed_paper_is_reported_and_the_rest_still_run(wired, monkeypatch, folder, reader):
+    for key, title in (("smith2024graph", "Graph"), ("jones2023deep", "Deep")):
+        (folder / f"{key} {title}.pdf").write_bytes(PDF)
+    fake = focus_wired(
+        wired, monkeypatch,
+        [row("smith2024graph", "Graph", "smith2024graph Graph.pdf"),
+         row("jones2023deep", "Deep", "jones2023deep Deep.pdf")],
+    )
+    reader(fail_on=("jones",))
+
+    result = summarize_run()
+
+    assert fake.written == {"page-smith2024graph": ["New idea in Graph."]}
+    assert "jones2023deep" in result.output and "Not logged in" in result.output
+    assert "$0.75" in result.output, "the failed read's cost is in the total"
+    assert result.exit_code != 0, "a failure is visible to scripts too"
+
+
+def test_a_row_with_no_pdf_is_reported_not_read(wired, monkeypatch, folder, reader):
+    fake = focus_wired(wired, monkeypatch, [row("smith2024graph", "Graph")])
+    read = reader()
+
+    result = summarize_run()
+
+    assert read == [] and fake.written == {}
+    assert "no PDF" in result.output
+    assert result.exit_code == 0, "a missing file is reported, as sync does, not a failure"
